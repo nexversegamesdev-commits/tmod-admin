@@ -4,7 +4,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_IDS = String(process.env.ADMIN_ID || '5172079937,6514446862')
+const ENV_ADMINS = String(process.env.ADMIN_ID || '5172079937,6514446862')
   .split(',')
   .map((id) => id.trim())
   .filter(Boolean);
@@ -31,7 +31,10 @@ function freshKeys() {
   return SEED_KEYS.map((key) => ({ key, usedBy: null, usedAt: 0, createdAt: 0 }));
 }
 
-let state = { devices: [], keys: freshKeys(), bannedKeys: [], bannedHwids: [] };
+let state = {
+  devices: [], keys: freshKeys(), bannedKeys: [], bannedHwids: [],
+  admins: [], pending: []
+};
 try {
   const saved = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   state = Object.assign(state, saved);
@@ -39,6 +42,11 @@ try {
   // fresh start
 }
 if (!Array.isArray(state.keys) || !state.keys.length) state.keys = freshKeys();
+if (!Array.isArray(state.admins)) state.admins = [];
+if (!Array.isArray(state.pending)) state.pending = [];
+for (const id of ENV_ADMINS) {
+  if (!state.admins.includes(id)) state.admins.push(id);
+}
 
 let lastSha = null;
 
@@ -143,14 +151,42 @@ async function tg(method, payload) {
 }
 
 function replyToAdmin(text, markup) {
-  const jobs = ADMIN_IDS.map((id) => tg('sendMessage', {
+  const jobs = state.admins.map((id) => tg('sendMessage', {
     chat_id: id, text, reply_markup: markup
   }));
   return Promise.all(jobs);
 }
 
 function isAdmin(id) {
-  return ADMIN_IDS.includes(String(id));
+  return state.admins.includes(String(id));
+}
+
+async function requestAccess(msg) {
+  const id = String(msg.chat.id);
+  const name = [msg.chat.first_name, msg.chat.last_name].filter(Boolean).join(' ') || 'без имени';
+  const username = msg.chat.username ? '@' + msg.chat.username : '—';
+  if (state.admins.includes(id)) return;
+  if (state.pending.includes(id)) {
+    await tg('sendMessage', {
+      chat_id: id,
+      text: 'Запрос на доступ уже отправлен администратору.'
+    });
+    return;
+  }
+  state.pending.push(id);
+  save();
+  await tg('sendMessage', {
+    chat_id: id,
+    text: 'Запрос на доступ отправлен администратору.'
+  });
+  await replyToAdmin(
+    `🔔 Запрос доступа к боту\nИмя: ${name}\nUsername: ${username}\nID: ${id}`,
+    {
+      inline_keyboard: [[
+        { text: '✅ Разрешить', callback_data: 'am:' + id },
+        { text: '❌ Отклонить', callback_data: 'rj:' + id }
+      ]]
+    });
 }
 
 function deviceText(d) {
@@ -226,10 +262,23 @@ function mainMenu() {
         ],
         [
           { text: '🚫 Бан-лист', callback_data: 'm:bans' },
-          { text: 'ℹ️ Помощь', callback_data: 'm:help' }
-        ]
+          { text: '👤 Админы', callback_data: 'm:admins' }
+        ],
+        [{ text: 'ℹ️ Помощь', callback_data: 'm:help' }]
       ]
     }
+  };
+}
+
+function adminsMenu() {
+  const rows = state.admins.map((id) => [{
+    text: '🗑 ' + id,
+    callback_data: 'rmadm:' + id
+  }]);
+  rows.push(backRow('m:home'));
+  return {
+    text: 'Админы бота (нажми ID, чтобы снять доступ):',
+    markup: { inline_keyboard: rows }
   };
 }
 
@@ -309,6 +358,36 @@ async function handleCallback(q) {
     if (data === 'm:keys') return show(q, keysMenu());
     if (data === 'm:devs') return show(q, devicesMenu());
     if (data === 'm:bans') return show(q, bansMenu());
+    if (data === 'm:admins') return show(q, adminsMenu());
+    if (data.startsWith('am:') || data.startsWith('rj:')) {
+      const approve = data.startsWith('am:');
+      const id = String(data.slice(3)).trim();
+      state.pending = state.pending.filter((pending) => pending !== id);
+      if (approve && !state.admins.includes(id)) state.admins.push(id);
+      save();
+      await tg('answerCallbackQuery', {
+        callback_query_id: q.id,
+        text: approve ? 'Доступ выдан' : 'Отклонено'
+      });
+      if (approve) {
+        await tg('sendMessage', {
+          chat_id: id,
+          text: 'Доступ к админ-панели выдан. Отправь /start.'
+        });
+      }
+      return show(q, adminsMenu());
+    }
+    if (data.startsWith('rmadm:')) {
+      const id = String(data.slice(6)).trim();
+      if (state.admins.length <= 1) {
+        await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Нельзя убрать последнего админа' });
+        return show(q, adminsMenu());
+      }
+      state.admins = state.admins.filter((admin) => admin !== id);
+      save();
+      await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Доступ снят' });
+      return show(q, adminsMenu());
+    }
     if (data === 'm:help') {
       return show(q, {
         text: 'Разделы кнопками:\n• Ключи — создание и удаление\n' +
@@ -404,20 +483,37 @@ async function handleCallback(q) {
 }
 
 async function handleMessage(msg) {
-  if (!isAdmin(msg.chat && msg.chat.id)) return;
+  if (!isAdmin(msg.chat && msg.chat.id)) {
+    await requestAccess(msg);
+    return;
+  }
   const text = String(msg.text || '').trim();
+  const chatId = msg.chat.id;
   const menu = mainMenu();
   if (text === '/start' || text === '/menu' || text === '/help') {
-    return replyToAdmin(menu.text, menu.markup);
+    return tg('sendMessage', { chat_id: chatId, text: menu.text, reply_markup: menu.markup });
   }
-  if (text === '/devices') return replyToAdmin(devicesMenu().text, devicesMenu().markup);
-  if (text === '/bans') return replyToAdmin(bansMenu().text, bansMenu().markup);
-  if (text === '/keys') return replyToAdmin(keysMenu().text, keysMenu().markup);
+  if (text === '/devices') {
+    const m = devicesMenu();
+    return tg('sendMessage', { chat_id: chatId, text: m.text, reply_markup: m.markup });
+  }
+  if (text === '/bans') {
+    const m = bansMenu();
+    return tg('sendMessage', { chat_id: chatId, text: m.text, reply_markup: m.markup });
+  }
+  if (text === '/keys') {
+    const m = keysMenu();
+    return tg('sendMessage', { chat_id: chatId, text: m.text, reply_markup: m.markup });
+  }
   if (text === '/newkey') {
     const key = newKey();
     save();
-    return replyToAdmin('Новый ключ: ' + key, {
-      inline_keyboard: [[{ text: '➕ Ещё', callback_data: 'k:new' }], backRow('m:keys')]
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: 'Новый ключ: ' + key,
+      reply_markup: {
+        inline_keyboard: [[{ text: '➕ Ещё', callback_data: 'k:new' }], backRow('m:keys')]
+      }
     });
   }
 }
