@@ -4,7 +4,10 @@ const fs = require('fs');
 const crypto = require('crypto');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const ADMIN_ID = String(process.env.ADMIN_ID || '5172079937');
+const ADMIN_IDS = String(process.env.ADMIN_ID || '5172079937,6514446862')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = process.env.DATA_FILE || './data.json';
@@ -140,7 +143,14 @@ async function tg(method, payload) {
 }
 
 function replyToAdmin(text, markup) {
-  return tg('sendMessage', { chat_id: ADMIN_ID, text, reply_markup: markup });
+  const jobs = ADMIN_IDS.map((id) => tg('sendMessage', {
+    chat_id: id, text, reply_markup: markup
+  }));
+  return Promise.all(jobs);
+}
+
+function isAdmin(id) {
+  return ADMIN_IDS.includes(String(id));
 }
 
 function deviceText(d) {
@@ -292,7 +302,7 @@ async function show(cbq, menu) {
 }
 
 async function handleCallback(q) {
-  if (String(q.from && q.from.id) !== ADMIN_ID) return;
+  if (!isAdmin(q.from && q.from.id)) return;
   const data = String(q.data || '');
   try {
     if (data === 'm:home') return show(q, mainMenu());
@@ -394,7 +404,7 @@ async function handleCallback(q) {
 }
 
 async function handleMessage(msg) {
-  if (String(msg.chat && msg.chat.id) !== ADMIN_ID) return;
+  if (!isAdmin(msg.chat && msg.chat.id)) return;
   const text = String(msg.text || '').trim();
   const menu = mainMenu();
   if (text === '/start' || text === '/menu' || text === '/help') {
