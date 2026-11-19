@@ -588,7 +588,16 @@ async function start() {
   server.listen(PORT, () => {
     console.log('tmod admin listening on ' + PORT);
     poll();
+    selfPing();
   });
+}
+
+/** Самопинг: Render free засыпает без входящих запросов, свой URL держит сервис живым. */
+function selfPing() {
+  const url = process.env.RENDER_EXTERNAL_URL || 'https://tmod-admin.onrender.com/';
+  setInterval(() => {
+    fetch(url).catch(() => {});
+  }, 4 * 60 * 1000);
 }
 
 start();
