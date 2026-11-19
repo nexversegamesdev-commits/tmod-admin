@@ -8,6 +8,9 @@ const ADMIN_ID = String(process.env.ADMIN_ID || '5172079937');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = process.env.DATA_FILE || './data.json';
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const DATA_REPO = process.env.DATA_REPO;
+const DATA_PATH = process.env.DATA_PATH || 'data.json';
 const TG = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 if (!BOT_TOKEN || !ADMIN_TOKEN) {
@@ -16,7 +19,10 @@ if (!BOT_TOKEN || !ADMIN_TOKEN) {
 }
 
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const SEED_KEYS = ['K7QM4XT2', 'R9PB3ZWD', 'H5NC8YFA', 'T4LW6KQS', 'M8JD2VXR'];
+const SEED_KEYS = [
+  'Q2M7XK4P', 'R8TZ3WNF', 'B5YK9HJD', 'V6NX2QSL', 'C9PM4RTW',
+  'D3QW8ZKX', 'F7HJ2MBN', 'G4XP9KRT', 'J6BR3VQY', 'L8MN5XZS'
+];
 
 function freshKeys() {
   return SEED_KEYS.map((key) => ({ key, usedBy: null, usedAt: 0, createdAt: 0 }));
@@ -31,11 +37,68 @@ try {
 }
 if (!Array.isArray(state.keys) || !state.keys.length) state.keys = freshKeys();
 
+let lastSha = null;
+
 function save() {
   try {
     fs.writeFileSync(DATA_FILE, JSON.stringify(state, null, 2));
   } catch (e) {
     console.error('save failed', e);
+  }
+  if (GITHUB_TOKEN && DATA_REPO) {
+    clearTimeout(save.timer);
+    save.timer = setTimeout(persistRemote, 1500);
+  }
+}
+
+function ghHeaders() {
+  return {
+    Authorization: 'token ' + GITHUB_TOKEN,
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'tmod-admin'
+  };
+}
+
+async function loadRemote() {
+  if (!GITHUB_TOKEN || !DATA_REPO) return;
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${DATA_REPO}/contents/${DATA_PATH}`,
+      { headers: ghHeaders() });
+    if (res.status === 200) {
+      const json = await res.json();
+      lastSha = json.sha;
+      const text = Buffer.from(json.content, 'base64').toString('utf8');
+      state = Object.assign(state, JSON.parse(text));
+      console.log('state loaded from GitHub');
+    }
+  } catch (e) {
+    console.error('remote load failed', e);
+  }
+}
+
+async function persistRemote() {
+  try {
+    const body = {
+      message: 'state ' + new Date().toISOString(),
+      content: Buffer.from(JSON.stringify(state, null, 2)).toString('base64')
+    };
+    if (lastSha) body.sha = lastSha;
+    const res = await fetch(
+      `https://api.github.com/repos/${DATA_REPO}/contents/${DATA_PATH}`,
+      {
+        method: 'PUT',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, ghHeaders()),
+        body: JSON.stringify(body)
+      });
+    if (res.ok) {
+      const json = await res.json();
+      lastSha = json.content.sha;
+    } else {
+      console.error('persist failed', res.status, await res.text());
+    }
+  } catch (e) {
+    console.error('persist error', e);
   }
 }
 
@@ -413,7 +476,13 @@ const server = http.createServer((req, res) => {
   json(res, 404, { error: 'not found' });
 });
 
-server.listen(PORT, () => {
-  console.log('tmod admin listening on ' + PORT);
-  poll();
-});
+async function start() {
+  await loadRemote();
+  if (!Array.isArray(state.keys) || !state.keys.length) state.keys = freshKeys();
+  server.listen(PORT, () => {
+    console.log('tmod admin listening on ' + PORT);
+    poll();
+  });
+}
+
+start();
