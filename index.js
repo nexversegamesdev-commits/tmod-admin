@@ -1,4 +1,4 @@
-// tmod admin server: licensing, devices, bans and Telegram admin bot.
+// tmod admin server: licensing, devices, bans and Telegram admin bot (button UI).
 const http = require('http');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -80,17 +80,20 @@ function replyToAdmin(text, markup) {
   return tg('sendMessage', { chat_id: ADMIN_ID, text, reply_markup: markup });
 }
 
-function deviceButtons(d) {
-  return {
-    inline_keyboard: [[
-      { text: '🚫 Бан HWID', callback_data: 'bh:' + d.hwid },
-      { text: '🚫 Бан ключ', callback_data: 'bk:' + d.key }
-    ]]
-  };
+function deviceText(d) {
+  return `Устройство\nКлюч: ${d.key}\nМодель: ${d.model}\nAndroid: ${d.android}\nHWID: ${d.hwid}\nIP: ${d.ip}`;
 }
 
-function deviceText(d) {
-  return `Ключ активирован\nКлюч: ${d.key}\nУстройство: ${d.model}\nAndroid: ${d.android}\nHWID: ${d.hwid}\nIP: ${d.ip}`;
+function deviceButtons(index) {
+  return {
+    inline_keyboard: [
+      [
+        { text: '🚫 Бан HWID', callback_data: 'bh:' + index },
+        { text: '🚫 Бан ключ', callback_data: 'bk:' + index }
+      ],
+      [{ text: '◀️ К устройствам', callback_data: 'm:devs' }]
+    ]
+  };
 }
 
 async function handleActivation(body, ip) {
@@ -112,14 +115,15 @@ async function handleActivation(body, ip) {
     ip,
     ts: Date.now()
   };
-  const existing = state.devices.find((d) => norm(d.hwid) === hwid);
-  if (existing) {
-    Object.assign(existing, record);
+  let index = state.devices.findIndex((d) => norm(d.hwid) === hwid);
+  if (index >= 0) {
+    Object.assign(state.devices[index], record);
   } else {
     state.devices.push(record);
+    index = state.devices.length - 1;
   }
   save();
-  await replyToAdmin(deviceText(record), deviceButtons(record));
+  await replyToAdmin(deviceText(record), deviceButtons(index));
   return { ok: true };
 }
 
@@ -134,78 +138,214 @@ function handleCheck(hwid, key) {
   return { banned: false };
 }
 
+function mainMenu() {
+  const free = state.keys.filter((k) => !k.usedBy).length;
+  return {
+    text: 'tmod · админ-панель\n' +
+      `Устройств: ${state.devices.length}\n` +
+      `Ключей: ${state.keys.length} (свободных ${free})\n` +
+      `Банов: ${state.bannedKeys.length + state.bannedHwids.length}`,
+    markup: {
+      inline_keyboard: [
+        [
+          { text: '🔑 Ключи', callback_data: 'm:keys' },
+          { text: '📱 Устройства', callback_data: 'm:devs' }
+        ],
+        [
+          { text: '🚫 Бан-лист', callback_data: 'm:bans' },
+          { text: 'ℹ️ Помощь', callback_data: 'm:help' }
+        ]
+      ]
+    }
+  };
+}
+
+function keysMenu() {
+  const free = state.keys.filter((k) => !k.usedBy).length;
+  return {
+    text: `Ключи\nВсего: ${state.keys.length}\nСвободных: ${free}`,
+    markup: {
+      inline_keyboard: [
+        [
+          { text: '➕ Создать ключ', callback_data: 'k:new' },
+          { text: '➕ Создать ×5', callback_data: 'k:new5' }
+        ],
+        [
+          { text: '📋 Свободные', callback_data: 'k:free' },
+          { text: '📋 Все ключи', callback_data: 'k:all' }
+        ],
+        [{ text: '◀️ Назад', callback_data: 'm:home' }]
+      ]
+    }
+  };
+}
+
+function backRow(target) {
+  return [{ text: '◀️ Назад', callback_data: target }];
+}
+
+function devicesMenu() {
+  const rows = [];
+  state.devices.slice(-10).forEach((d, i) => {
+    const idx = state.devices.length - Math.min(10, state.devices.length) + i;
+    rows.push([{
+      text: `📱 ${String(d.model).slice(0, 28)} · ${d.key}`,
+      callback_data: 'd:' + idx
+    }]);
+  });
+  rows.push(backRow('m:home'));
+  return {
+    text: state.devices.length ? 'Устройства (последние 10):' : 'Устройств пока нет.',
+    markup: { inline_keyboard: rows }
+  };
+}
+
+function bansMenu() {
+  const rows = [];
+  state.bannedKeys.forEach((_, i) => {
+    rows.push([{ text: '✅ ' + state.bannedKeys[i], callback_data: 'ub:sk:' + i }]);
+  });
+  state.bannedHwids.forEach((_, i) => {
+    rows.push([{ text: '✅ ' + String(state.bannedHwids[i]).slice(0, 18) + '…', callback_data: 'ub:sh:' + i }]);
+  });
+  rows.push(backRow('m:home'));
+  const total = state.bannedKeys.length + state.bannedHwids.length;
+  return {
+    text: total ? 'Бан-лист (нажми, чтобы разбанить):' : 'Бан-лист пуст.',
+    markup: { inline_keyboard: rows }
+  };
+}
+
+async function show(cbq, menu) {
+  const chatId = cbq.message.chat.id;
+  const messageId = cbq.message.message_id;
+  await tg('editMessageText', {
+    chat_id: chatId,
+    message_id: messageId,
+    text: menu.text,
+    reply_markup: menu.markup,
+    disable_web_page_preview: true
+  });
+}
+
 async function handleCallback(q) {
   if (String(q.from && q.from.id) !== ADMIN_ID) return;
   const data = String(q.data || '');
-  const [action, ...rest] = data.split(':');
-  const value = rest.join(':');
-  if (action === 'bh') {
-    if (!state.bannedHwids.map(norm).includes(norm(value))) state.bannedHwids.push(value);
-    save();
-    await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'HWID забанен' });
-    await replyToAdmin(`🚫 HWID забанен:\n${value}`);
-  } else if (action === 'bk') {
-    if (!state.bannedKeys.map(norm).includes(norm(value))) state.bannedKeys.push(value);
-    save();
-    await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Ключ забанен' });
-    await replyToAdmin(`🚫 Ключ забанен:\n${value}`);
-  } else if (action === 'ub') {
-    state.bannedKeys = state.bannedKeys.filter((k) => norm(k) !== norm(value));
-    state.bannedHwids = state.bannedHwids.filter((h) => norm(h) !== norm(value));
-    save();
-    await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Разбанен' });
-    await replyToAdmin(`✅ Разбанен:\n${value}`);
+  try {
+    if (data === 'm:home') return show(q, mainMenu());
+    if (data === 'm:keys') return show(q, keysMenu());
+    if (data === 'm:devs') return show(q, devicesMenu());
+    if (data === 'm:bans') return show(q, bansMenu());
+    if (data === 'm:help') {
+      return show(q, {
+        text: 'Разделы кнопками:\n• Ключи — создание и удаление\n' +
+          '• Устройства — карточка и бан по HWID/ключу\n' +
+          '• Бан-лист — разбан кнопкой',
+        markup: { inline_keyboard: [backRow('m:home')] }
+      });
+    }
+    if (data === 'k:new' || data === 'k:new5') {
+      const count = data === 'k:new5' ? 5 : 1;
+      const created = [];
+      for (let i = 0; i < count; i++) created.push(newKey());
+      save();
+      return show(q, {
+        text: 'Новые ключи:\n' + created.map((k) => '• ' + k).join('\n'),
+        markup: {
+          inline_keyboard: [
+            [{ text: '➕ Ещё', callback_data: 'k:new' }],
+            backRow('m:keys')
+          ]
+        }
+      });
+    }
+    if (data === 'k:free') {
+      const free = state.keys.filter((k) => !k.usedBy);
+      return show(q, {
+        text: free.length
+          ? 'Свободные ключи:\n' + free.map((k) => '• ' + k.key).join('\n')
+          : 'Свободных ключей нет.',
+        markup: { inline_keyboard: [backRow('m:keys')] }
+      });
+    }
+    if (data === 'k:all') {
+      const rows = [];
+      state.keys.slice(-25).forEach((k) => {
+        rows.push([{
+          text: `🗑 ${k.key}${k.usedBy ? ' · занят' : ''}`,
+          callback_data: 'del:' + k.key
+        }]);
+      });
+      rows.push(backRow('m:keys'));
+      return show(q, {
+        text: 'Все ключи (нажми на ключ, чтобы удалить):',
+        markup: { inline_keyboard: rows }
+      });
+    }
+    if (data.startsWith('del:')) {
+      const key = norm(data.slice(4));
+      const before = state.keys.length;
+      state.keys = state.keys.filter((k) => norm(k.key) !== key);
+      save();
+      await tg('answerCallbackQuery', { callback_query_id: q.id, text: state.keys.length < before ? 'Ключ удалён' : 'Не найден' });
+      return show(q, keysMenu());
+    }
+    if (data.startsWith('d:')) {
+      const index = parseInt(data.slice(2), 10);
+      const d = state.devices[index];
+      if (!d) return show(q, devicesMenu());
+      return show(q, { text: deviceText(d), markup: deviceButtons(index) });
+    }
+    if (data.startsWith('bh:') || data.startsWith('bk:')) {
+      const isHwid = data.startsWith('bh:');
+      const index = parseInt(data.slice(3), 10);
+      const d = state.devices[index];
+      if (!d) return show(q, devicesMenu());
+      if (isHwid) {
+        if (!state.bannedHwids.map(norm).includes(norm(d.hwid))) state.bannedHwids.push(d.hwid);
+      } else {
+        if (!state.bannedKeys.map(norm).includes(norm(d.key))) state.bannedKeys.push(d.key);
+      }
+      save();
+      await tg('answerCallbackQuery', {
+        callback_query_id: q.id,
+        text: isHwid ? 'HWID забанен' : 'Ключ забанен'
+      });
+      return show(q, {
+        text: (isHwid ? '🚫 HWID забанен\n' : '🚫 Ключ забанен\n') + deviceText(d),
+        markup: deviceButtons(index)
+      });
+    }
+    if (data.startsWith('ub:sk:') || data.startsWith('ub:sh:')) {
+      const isKey = data.startsWith('ub:sk:');
+      const index = parseInt(data.slice(6), 10);
+      if (isKey) state.bannedKeys.splice(index, 1);
+      else state.bannedHwids.splice(index, 1);
+      save();
+      await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Разбанен' });
+      return show(q, bansMenu());
+    }
+  } catch (e) {
+    console.error('callback failed', e);
   }
 }
 
 async function handleMessage(msg) {
   if (String(msg.chat && msg.chat.id) !== ADMIN_ID) return;
   const text = String(msg.text || '').trim();
-  const parts = text.split(/\s+/);
-  const cmd = (parts[0] || '').toLowerCase();
-
-  if (cmd === '/start' || cmd === '/help') {
-    await replyToAdmin(
-      'Команды:\n/newkey [N] — создать ключи\n/keys — свободные ключи\n' +
-      '/keys all — все ключи\n/delkey <KEY> — удалить ключ (отзыв)\n' +
-      '/devices — устройства\n/bans — бан-лист\n' +
-      'Кнопки под устройством: бан HWID / бан ключа');
-  } else if (cmd === '/newkey') {
-    let count = parseInt(parts[1] || '1', 10);
-    if (!count || count < 1) count = 1;
-    if (count > 20) count = 20;
-    const created = [];
-    for (let i = 0; i < count; i++) created.push(newKey());
+  const menu = mainMenu();
+  if (text === '/start' || text === '/menu' || text === '/help') {
+    return replyToAdmin(menu.text, menu.markup);
+  }
+  if (text === '/devices') return replyToAdmin(devicesMenu().text, devicesMenu().markup);
+  if (text === '/bans') return replyToAdmin(bansMenu().text, bansMenu().markup);
+  if (text === '/keys') return replyToAdmin(keysMenu().text, keysMenu().markup);
+  if (text === '/newkey') {
+    const key = newKey();
     save();
-    await replyToAdmin('Новые ключи:\n' + created.map((k) => '• ' + k).join('\n'));
-  } else if (cmd === '/keys') {
-    const all = (parts[1] || '').toLowerCase() === 'all';
-    const list = state.keys.filter((k) => all || !k.usedBy);
-    if (!list.length) return replyToAdmin(all ? 'Ключей нет.' : 'Свободных ключей нет.');
-    const lines = list.slice(-60).map((k) => {
-      const status = k.usedBy ? 'занят' : 'свободен';
-      return `${k.key} — ${status}`;
+    return replyToAdmin('Новый ключ: ' + key, {
+      inline_keyboard: [[{ text: '➕ Ещё', callback_data: 'k:new' }], backRow('m:keys')]
     });
-    await replyToAdmin((all ? 'Все ключи' : 'Свободные ключи') + ':\n' + lines.join('\n'));
-  } else if (cmd === '/delkey') {
-    const key = norm(parts[1] || '');
-    if (!key) return replyToAdmin('Использование: /delkey K7QM4XT2');
-    const before = state.keys.length;
-    state.keys = state.keys.filter((k) => norm(k.key) !== key);
-    save();
-    await replyToAdmin(state.keys.length < before
-      ? `🗑 Ключ удалён: ${key}` : `Ключ не найден: ${key}`);
-  } else if (cmd === '/devices') {
-    if (!state.devices.length) return replyToAdmin('Устройств пока нет.');
-    for (const d of state.devices.slice(-20)) {
-      await replyToAdmin(deviceText(d), deviceButtons(d));
-    }
-  } else if (cmd === '/bans') {
-    const rows = [];
-    for (const k of state.bannedKeys) rows.push([{ text: '✅ ' + k, callback_data: 'ub:' + k }]);
-    for (const h of state.bannedHwids) rows.push([{ text: '✅ ' + h.slice(0, 16) + '…', callback_data: 'ub:' + h }]);
-    if (!rows.length) return replyToAdmin('Бан-лист пуст.');
-    await replyToAdmin('Бан-лист (нажми, чтобы разбанить):', { inline_keyboard: rows });
   }
 }
 
