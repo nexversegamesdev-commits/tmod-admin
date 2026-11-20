@@ -373,6 +373,17 @@ async function requestAccess(msg) {
     });
 }
 
+async function sendEvidence(adminId, photos) {
+  for (let i = 0; i < photos.length; i += 10) {
+    const chunk = photos.slice(i, i + 10).map((id) => ({ type: 'photo', media: id }));
+    try {
+      await tg('sendMediaGroup', { chat_id: adminId, media: chunk });
+    } catch (e) {
+      console.error('evidence send failed', e.message);
+    }
+  }
+}
+
 function deviceText(d) {
   return `Устройство\nКлюч: ${d.key}\nМодель: ${d.model}\nAndroid: ${d.android}\n` +
     `Регион: ${d.geo || '?'}\nСборка: ${d.build || '?'}\nHWID: ${d.hwid}\nIP: ${d.ip}`;
@@ -467,12 +478,13 @@ function mainMenuFor(id) {
     ],
     [
       { text: '👤 Профиль', callback_data: 'm:profile' },
-      { text: '👥 Реферальная система', callback_data: 'm:ref' }
+      { text: '🎟 Промокоды', callback_data: 'promo:enter' }
     ],
     [
-      { text: '🆘 Поддержка', callback_data: 'm:support' },
-      { text: 'ℹ️ Помощь', callback_data: 'm:help2' }
-    ]
+      { text: '👥 Реферальная система', callback_data: 'm:ref' },
+      { text: '🆘 Поддержка', callback_data: 'm:support' }
+    ],
+    [{ text: 'ℹ️ Помощь', callback_data: 'm:help2' }]
   ];
   if (isAdmin(id)) {
     rows.push([{ text: '⚙️ Админ', callback_data: 'm:admin' }]);
@@ -600,14 +612,13 @@ function marketMenu() {
       '7 дней — $1\n' +
       '30 дней — $3\n' +
       'Навсегда — $5\n\n' +
-      'Оплата подключается. Пока ключ можно получить у @Ftor0_0.',
+      'Покупка с баланса. Сначала пополните баланс в разделе «Баланс».',
     markup: {
       inline_keyboard: [
         [{ text: '7 дней — $1', callback_data: 'plan:7' }],
         [{ text: '30 дней — $3', callback_data: 'plan:30' }],
         [{ text: 'Навсегда — $5', callback_data: 'plan:forever' }],
         [{ text: '🎁 Получить бесплатно', callback_data: 'free:get' }],
-        [{ text: '🎟 Ввести промокод', callback_data: 'promo:enter' }],
         [{ text: `🔁 Сброс HWID — $${RESET_PRICE.toFixed(2)}`, callback_data: 'm:reset' }],
         [{ text: '📦 +3 сброса HWID — $1', callback_data: 'resetpack' }],
         [{ text: '◀️ Назад', callback_data: 'm:home' }]
@@ -621,13 +632,15 @@ function freeMenu() {
     text: '📋 ' + c.slice(0, 42),
     copy_text: { text: c }
   }]));
-  rows.push([{ text: '📨 Отправить заявку', callback_data: 'free:req' }]);
-  rows.push([{ text: '💬 Написать @Ftor0_0', url: 'https://t.me/Ftor0_0' }]);
+  rows.push([{ text: '📨 Оставить заявку', callback_data: 'free:req' }]);
   rows.push(backRow('m:market'));
   return {
     text: '🎁 Бесплатная подписка на 1 день\n\n' +
-      'Условия: написать 15 комментариев — каждый из списка по 3 раза — ' +
-      'и отправить их @Ftor0_0.\n' +
+      'Что нужно сделать:\n' +
+      '1) Написать 15 комментариев под видео TikTok про автопрогрев аккаунта ' +
+      '(похожие ролики), используя комментарии ниже — каждый по 3 раза.\n' +
+      '2) Сделать скриншот каждого комментария (15 скриншотов).\n' +
+      '3) Нажать «📨 Оставить заявку» и отправить все 15 скриншотов.\n\n' +
       'Бесплатный ключ можно получать раз в 2 недели.\n\n' +
       'Нажми на комментарий, чтобы скопировать его:',
     markup: { inline_keyboard: rows }
@@ -1009,6 +1022,23 @@ async function handleCallback(q) {
           markup: { inline_keyboard: [backRow('m:market')] }
         });
       }
+      waiting.set(String(q.from.id), { action: 'free_shots', photos: [] });
+      return show(q, {
+        text: '📸 Отправьте 15 скриншотов ваших комментариев по одному сообщению.\n' +
+          'Я буду считать: 0/15.',
+        markup: { inline_keyboard: [backRow('m:market')] }
+      });
+    }
+
+    if (data === 'free:confirm') {
+      const shot = waiting.get(String(q.from.id));
+      if (!shot || shot.action !== 'free_confirm' || shot.photos.length < 15) {
+        return show(q, {
+          text: 'Не хватает скриншотов. Начните заявку заново.',
+          markup: { inline_keyboard: [backRow('m:market')] }
+        });
+      }
+      waiting.delete(String(q.from.id));
       const order = {
         id: crypto.randomBytes(3).toString('hex'),
         days: 1,
@@ -1017,6 +1047,7 @@ async function handleCallback(q) {
         username: q.from.username || '',
         status: 'new',
         type: 'free',
+        photos: shot.photos.slice(),
         ts: Date.now()
       };
       state.orders.push(order);
@@ -1024,16 +1055,25 @@ async function handleCallback(q) {
       await replyToAdmin(
         `🎁 Заявка на бесплатный доступ #${order.id}\n` +
         `Покупатель: ${order.username ? '@' + order.username : '—'} (${order.chatId})\n` +
-        'Проверьте 15 комментариев и выдайте ключ на 1 день.',
+        'Скриншоты: 15 шт. Ниже придут фото.',
         {
           inline_keyboard: [[
             { text: '✅ Выдать 1 день', callback_data: 'ord:' + order.id + ':ok' },
             { text: '❌ Отклонить', callback_data: 'ord:' + order.id + ':no' }
           ]]
         });
+      for (const adminId of state.admins) {
+        await sendEvidence(adminId, order.photos);
+      }
       return show(q, {
-        text: `Заявка #${order.id} отправлена.\n` +
-          'Админ проверит ваши комментарии и выдаст ключ на 1 день прямо в этот чат.',
+        text: `Заявка #${order.id} отправлена на проверку.\nОтвет придёт в этот чат.`,
+        markup: { inline_keyboard: [backRow('m:market')] }
+      });
+    }
+    if (data === 'free:cancel') {
+      waiting.delete(String(q.from.id));
+      return show(q, {
+        text: 'Заявка отменена.',
         markup: { inline_keyboard: [backRow('m:market')] }
       });
     }
@@ -1149,6 +1189,11 @@ async function handleCallback(q) {
         order.status = 'cancelled';
         save();
         await replyToAdmin(`❌ Заявка #${order.id} отменена`);
+        await tg('sendMessage', {
+          chat_id: order.chatId,
+          text: `❌ Заявка #${order.id} отклонена.\n` +
+            'Проверьте, что отправлены 15 скриншотов комментариев под видео про автопрогрев.'
+        });
         await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Отменено' });
       }
       return;
@@ -1461,6 +1506,32 @@ async function handleCallback(q) {
 async function handleMessage(msg) {
   const chatId = msg.chat && msg.chat.id;
   if (!chatId) return;
+  if (msg.photo && msg.photo.length) {
+    const shot = waiting.get(String(chatId));
+    if (shot && shot.action === 'free_shots') {
+      const fileId = msg.photo[msg.photo.length - 1].file_id;
+      shot.photos.push(fileId);
+      const count = shot.photos.length;
+      if (count < 15) {
+        return tg('sendMessage', {
+          chat_id: chatId,
+          text: `📸 Принято ${count}/15. Отправьте следующий скриншот.`
+        });
+      }
+      shot.action = 'free_confirm';
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: '📸 Получено 15/15 скриншотов.\nПодтвердите отправку заявки.',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '✅ Отправить заявку', callback_data: 'free:confirm' }],
+            [{ text: '❌ Отмена', callback_data: 'free:cancel' }]
+          ]
+        }
+      });
+    }
+    return;
+  }
   const text = String(msg.text || '').trim();
   if (text.startsWith('/start')) {
     const payload = text.split(/\s+/)[1] || '';
