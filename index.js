@@ -443,7 +443,6 @@ function balanceMenu(chatId) {
     markup: {
       inline_keyboard: [
         [{ text: '➕ Пополнить', callback_data: 'm:topup' }],
-        [{ text: `🔁 Сброс HWID — $${RESET_PRICE.toFixed(2)}`, callback_data: 'm:reset' }],
         [{ text: '◀️ Назад', callback_data: 'm:home' }]
       ]
     }
@@ -452,7 +451,7 @@ function balanceMenu(chatId) {
 
 function topupMenu() {
   return {
-    text: '➕ Пополнение баланса\n\nВыберите сумму. Оплата через xRocket (USDT).',
+    text: '➕ Пополнение баланса\n\nВыберите сумму или введите свою (от $0.10). Оплата через xRocket (USDT).',
     markup: {
       inline_keyboard: [
         [
@@ -461,6 +460,7 @@ function topupMenu() {
           { text: '$5', callback_data: 'top:5' },
           { text: '$10', callback_data: 'top:10' }
         ],
+        [{ text: '✍️ Своя сумма', callback_data: 'top:custom' }],
         [{ text: '◀️ Назад', callback_data: 'm:balance' }]
       ]
     }
@@ -505,6 +505,7 @@ function marketMenu() {
         [{ text: 'Навсегда — $5', callback_data: 'plan:forever' }],
         [{ text: '🎁 Получить бесплатно', callback_data: 'free:get' }],
         [{ text: '🎟 Ввести промокод', callback_data: 'promo:enter' }],
+        [{ text: `🔁 Сброс HWID — $${RESET_PRICE.toFixed(2)}`, callback_data: 'm:reset' }],
         [{ text: '◀️ Назад', callback_data: 'm:home' }]
       ]
     }
@@ -770,6 +771,13 @@ async function handleCallback(q) {
             backRow('m:balance')
           ]
         }
+      });
+    }
+    if (data === 'top:custom') {
+      waiting.set(String(q.from.id), { action: 'topup_amount' });
+      return show(q, {
+        text: '✍️ Введите сумму пополнения в долларах (минимум 0.10):\nнапример, 1.5',
+        markup: { inline_keyboard: [backRow('m:topup')] }
       });
     }
     if (data.startsWith('top:')) {
@@ -1225,6 +1233,44 @@ async function handleMessage(msg) {
         'Введите его в «Настройки → Мод клиента».'
     });
   }
+  if (pendingInput && pendingInput.action === 'topup_amount' && text && !text.startsWith('/')) {
+    waiting.delete(String(chatId));
+    const amount = Math.round(parseFloat(text.replace(',', '.')) * 100) / 100;
+    if (!isFinite(amount) || amount < 0.1 || amount > 1000) {
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: 'Сумма должна быть от $0.10 до $1000. Попробуйте ещё раз.',
+        reply_markup: { inline_keyboard: [backRow('m:topup')] }
+      });
+    }
+    const invoice = await xrCreateInvoice(amount, chatId);
+    if (!invoice) {
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: 'Оплата временно недоступна. Попробуйте позже.'
+      });
+    }
+    state.invoices.push({
+      id: String(invoice.id),
+      clientInvoiceId: invoice.clientInvoiceId,
+      chatId,
+      amount,
+      status: 'active',
+      link: invoice.link
+    });
+    save();
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: `Счёт на $${amount.toFixed(2)} создан.\nОплатите и нажмите «Я оплатил».`,
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '💳 Оплатить через xRocket', url: invoice.link }],
+          [{ text: '✅ Я оплатил', callback_data: 'top:check:' + invoice.id }],
+          backRow('m:balance')
+        ]
+      }
+    });
+  }
   if (pendingInput && pendingInput.action === 'reset' && text && !text.startsWith('/')) {
     waiting.delete(String(chatId));
     const key = norm(text);
@@ -1443,6 +1489,7 @@ const server = http.createServer((req, res) => {
           const inv = state.invoices.find((i) => i.id === String(invoice.id)
             || (invoice.clientInvoiceId && i.clientInvoiceId === invoice.clientInvoiceId));
           if (inv && creditInvoice(inv)) {
+            console.log('webhook invoice paid: ' + invoice.id);
             await tg('sendMessage', {
               chat_id: inv.chatId,
               text: `✅ Баланс пополнен на $${Number(inv.amount).toFixed(2)}.\n` +
