@@ -54,6 +54,13 @@ const SUB_OK_TTL = 10 * 60 * 1000;
 const SUB_NO_TTL = 30 * 1000;
 const subCache = new Map();
 const pendingStart = new Map();
+const AVATAR_URL = 'https://tmod-admin.onrender.com/avatar.png';
+let AVATAR_BYTES = null;
+try {
+  AVATAR_BYTES = fs.readFileSync(__dirname + '/avatar.png');
+} catch (e) {
+  console.error('avatar.png missing');
+}
 
 function buildAllowed(build) {
   if (!BUILD_ENFORCE || !ALLOWED_BUILDS.length) return true;
@@ -363,8 +370,50 @@ function subGateMenu() {
 }
 
 function sendSubGate(chatId) {
-  const m = subGateMenu();
-  return tg('sendMessage', { chat_id: chatId, text: m.text, reply_markup: m.markup });
+  return sendWithPhoto(chatId, subGateMenu());
+}
+
+/** Отправляет меню фотографией с подписью и кнопками; при сбое — текстом. */
+async function sendWithPhoto(chatId, menu) {
+  const photo = menu.photo || AVATAR_URL;
+  if (photo) {
+    const r = await tg('sendPhoto', {
+      chat_id: chatId,
+      photo: state.avatarFileId || photo,
+      caption: menu.text,
+      reply_markup: menu.markup
+    });
+    if (r && r.ok) {
+      const sizes = r.result && r.result.photo;
+      if (!state.avatarFileId && sizes && sizes.length) {
+        state.avatarFileId = sizes[sizes.length - 1].file_id;
+        save();
+      }
+      return r;
+    }
+    if (state.avatarFileId) {
+      const retry = await tg('sendPhoto', {
+        chat_id: chatId,
+        photo: photo,
+        caption: menu.text,
+        reply_markup: menu.markup
+      });
+      if (retry && retry.ok) {
+        const sizes = retry.result && retry.result.photo;
+        if (sizes && sizes.length) {
+          state.avatarFileId = sizes[sizes.length - 1].file_id;
+          save();
+        }
+        return retry;
+      }
+    }
+    console.error('sendPhoto failed:', (r && r.description) || 'unknown');
+  }
+  return tg('sendMessage', { chat_id: chatId, text: menu.text, reply_markup: menu.markup });
+}
+
+function sendMainMenu(chatId) {
+  return sendWithPhoto(chatId, mainMenuFor(chatId));
 }
 
 /** true — подписан, false — нет. При технической ошибке не блокируем доступ. */
@@ -443,9 +492,36 @@ async function sendEvidence(adminId, photos) {
   }
 }
 
+function moscowTime(ts) {
+  if (!ts) return '—';
+  try {
+    return new Date(ts).toLocaleString('ru-RU', {
+      timeZone: 'Europe/Moscow', day: '2-digit', month: '2-digit',
+      year: 'numeric', hour: '2-digit', minute: '2-digit'
+    });
+  } catch (e) {
+    return new Date(ts).toISOString();
+  }
+}
+
+function subText(key) {
+  const entry = findKey(key);
+  if (!entry) return 'Подписка: ключ не найден';
+  const days = entry.planDays || (entry.expiresAt && entry.createdAt
+    ? Math.round((entry.expiresAt - entry.createdAt) / 86400000) : 0);
+  const left = !entry.expiresAt ? 'бессрочно'
+    : (entry.expiresAt <= Date.now() ? 'истекла'
+      : Math.max(0, Math.ceil((entry.expiresAt - Date.now()) / 86400000)) + ' дн.');
+  return 'Подписка: ' + (days ? days + ' дн.' : 'навсегда') + ' (осталось: ' + left + ')\n' +
+    'Куплена: ' + moscowTime(entry.createdAt) + ' (МСК)\n' +
+    'Активирована: ' + (entry.usedAt ? moscowTime(entry.usedAt) + ' (МСК)' : 'ещё нет') + '\n' +
+    'Действует до: ' + (entry.expiresAt ? moscowTime(entry.expiresAt) + ' (МСК)' : 'бессрочно');
+}
+
 function deviceText(d) {
   return `Устройство\nКлюч: ${d.key}\nМодель: ${d.model}\nAndroid: ${d.android}\n` +
-    `Регион: ${d.geo || '?'}\nСборка: ${d.build || '?'}\nHWID: ${d.hwid}\nIP: ${d.ip}`;
+    `Регион: ${d.geo || '?'}\nСборка: ${d.build || '?'}\nHWID: ${d.hwid}\nIP: ${d.ip}\n` +
+    `Последняя активация: ${moscowTime(d.ts)} (МСК)\n\n` + subText(d.key);
 }
 
 async function geoLookup(ip) {
@@ -921,8 +997,17 @@ function devicesMenu() {
   const rows = [];
   state.devices.slice(-10).forEach((d, i) => {
     const idx = state.devices.length - Math.min(10, state.devices.length) + i;
+    const entry = findKey(d.key);
+    let badge = '?';
+    if (entry) {
+      badge = entry.expiresAt
+        ? (entry.expiresAt > Date.now()
+          ? Math.ceil((entry.expiresAt - Date.now()) / 86400000) + 'д'
+          : 'истёк')
+        : '∞';
+    }
     rows.push([{
-      text: `📱 ${String(d.model).slice(0, 28)} · ${d.key}`,
+      text: `📱 ${String(d.model).slice(0, 24)} · ${d.key} · ${badge}`,
       callback_data: 'd:' + idx
     }]);
   });
@@ -952,13 +1037,25 @@ function bansMenu() {
 async function show(cbq, menu) {
   const chatId = cbq.message.chat.id;
   const messageId = cbq.message.message_id;
-  await tg('editMessageText', {
+  if (cbq.message.photo) {
+    const caption = await tg('editMessageCaption', {
+      chat_id: chatId,
+      message_id: messageId,
+      caption: menu.text,
+      reply_markup: menu.markup
+    });
+    if (caption && caption.ok) return;
+  }
+  const edited = await tg('editMessageText', {
     chat_id: chatId,
     message_id: messageId,
     text: menu.text,
     reply_markup: menu.markup,
     disable_web_page_preview: true
   });
+  if (edited && edited.ok) return;
+  await tg('deleteMessage', { chat_id: chatId, message_id: messageId });
+  await tg('sendMessage', { chat_id: chatId, text: menu.text, reply_markup: menu.markup });
 }
 
 async function handleCallback(q) {
@@ -1611,7 +1708,7 @@ async function startFlow(chatId, payload, cbq) {
   }
   const m = mainMenuFor(chatId);
   if (cbq) return show(cbq, m);
-  return tg('sendMessage', { chat_id: chatId, text: m.text, reply_markup: m.markup });
+  return sendMainMenu(chatId);
 }
 
 async function handleMessage(msg) {
@@ -1655,8 +1752,7 @@ async function handleMessage(msg) {
   }
   const text = rawText;
   if (text === '/menu' || text === '/help') {
-    const menu = mainMenuFor(chatId);
-    return tg('sendMessage', { chat_id: chatId, text: menu.text, reply_markup: menu.markup });
+    return sendMainMenu(chatId);
   }
   const pendingInput = waiting.get(String(chatId));
   if (pendingInput && pendingInput.action === 'promo' && text && !text.startsWith('/')) {
@@ -1891,6 +1987,18 @@ function json(res, code, data) {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
+  if (req.method === 'GET' && url.pathname === '/avatar.png') {
+    if (!AVATAR_BYTES) {
+      res.writeHead(404);
+      return res.end();
+    }
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Cache-Control': 'public, max-age=86400',
+      'Access-Control-Allow-Origin': '*'
+    });
+    return res.end(AVATAR_BYTES);
+  }
   if (req.method === 'GET' && url.pathname === '/') {
     return json(res, 200, {
       ok: true,
