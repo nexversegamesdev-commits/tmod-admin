@@ -29,13 +29,23 @@ const PLANS = [
   { id: 'forever', days: 0, price: '$5' }
 ];
 const FREE_COMMENTS = [
-  'это база', 'ну топчик', 'вот это да', 'очень сильно', 'просто огонь',
-  'согласен полностью', 'орнул с этого', 'жесть как так', 'кайф', 'топ контент',
-  'сильно', 'ахахах', 'что это было', 'не ожидал', 'залетаю'
+  '@GreiTikTok реально удобный мод 🔥',
+  'С авто прогревом аккаунта намного удобнее, особенно через @GreiTikTok',
+  'Автопрогрев — имба, @GreiTikTok',
+  '@GreiTikTok стоит попробовать 👀',
+  'Кто ещё не пробовал @GreiTikTok с авто прогревом?'
 ];
 const ALLOWED_BUILDS = String(process.env.ALLOWED_BUILDS || '')
   .split(',').map((b) => b.trim()).filter(Boolean);
 const BUILD_ENFORCE = process.env.BUILD_ENFORCE === '1';
+const XROCKET_KEY = process.env.XROCKET_KEY ||
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcHBJZCI6IjMxMDM2MyIsImp0aSI6ImFwcDozMTAzNjM6YzkzYmQ5MDItYjFjYS00M2EzLTgwYjctZTRmYTY2NTczN2VmIiwiaWF0IjoxNzk1MTY1Njk3fQ.kJ4mBlhaFh1fuGYFfaIwSH8OANd2BJi7FYb5aI527Tk';
+const XROCKET_BASE = process.env.XROCKET_BASE || 'https://pay.xrocket.tg/api';
+const REFERRAL_BONUS = 0.1;
+const PLAN_PRICE = { '7': 1, '30': 3, forever: 5 };
+const FREE_COOLDOWN_MS = 14 * 86400000;
+const RESET_PRICE = 0.5;
+let BOT_USERNAME = '';
 
 function buildAllowed(build) {
   if (!BUILD_ENFORCE || !ALLOWED_BUILDS.length) return true;
@@ -52,7 +62,8 @@ function freshKeys() {
 
 let state = {
   devices: [], keys: freshKeys(), bannedKeys: [], bannedHwids: [],
-  admins: [], pending: [], orders: [], promos: [], tickets: []
+  admins: [], pending: [], orders: [], promos: [], tickets: [],
+  users: {}, invoices: []
 };
 const waiting = new Map();
 try {
@@ -67,6 +78,16 @@ if (!Array.isArray(state.pending)) state.pending = [];
 if (!Array.isArray(state.orders)) state.orders = [];
 if (!Array.isArray(state.promos)) state.promos = [];
 if (!Array.isArray(state.tickets)) state.tickets = [];
+if (!state.users || typeof state.users !== 'object') state.users = {};
+if (!Array.isArray(state.invoices)) state.invoices = [];
+
+function user(chatId) {
+  const id = String(chatId);
+  if (!state.users[id]) {
+    state.users[id] = { balance: 0, referredBy: null, freeAt: 0 };
+  }
+  return state.users[id];
+}
 for (const id of ENV_ADMINS) {
   if (!state.admins.includes(id)) state.admins.push(id);
 }
@@ -193,6 +214,54 @@ function ticketFor(key, hwid) {
   return crypto.createHmac('sha256', LICENSE_SECRET)
     .update(key + '|' + hwid)
     .digest('hex');
+}
+
+function xrHeaders() {
+  return { 'Content-Type': 'application/json', 'Rocket-Pay-Key': XROCKET_KEY };
+}
+
+async function xrCreateInvoice(amount, chatId) {
+  try {
+    const res = await fetch(XROCKET_BASE + '/tg-invoices', {
+      method: 'POST',
+      headers: xrHeaders(),
+      body: JSON.stringify({
+        amount,
+        numPayments: 1,
+        currency: 'USDT',
+        description: 'GreiTikTok balance top-up',
+        hiddenMessage: 'Баланс пополнен. Спасибо!',
+        payload: 'topup:' + chatId,
+        expiredIn: 86400
+      })
+    });
+    const json = await res.json();
+    if (json && json.data && json.data.link) return json.data;
+    console.error('xrocket create failed', JSON.stringify(json).slice(0, 300));
+  } catch (e) {
+    console.error('xrocket create error', e.message);
+  }
+  return null;
+}
+
+async function xrInvoiceStatus(id) {
+  try {
+    const res = await fetch(XROCKET_BASE + '/tg-invoices/' + encodeURIComponent(id),
+      { headers: xrHeaders() });
+    const json = await res.json();
+    return json && json.data ? json.data : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function creditInvoice(invoice) {
+  if (!invoice || invoice.status === 'paid') return false;
+  const u = user(invoice.chatId);
+  u.balance = Math.round((u.balance + invoice.amount) * 100) / 100;
+  invoice.status = 'paid';
+  save();
+  return true;
 }
 
 async function tg(method, payload) {
@@ -333,6 +402,10 @@ function mainMenuFor(id) {
   const rows = [
     [
       { text: '🛒 Маркет', callback_data: 'm:market' },
+      { text: '💰 Баланс', callback_data: 'm:balance' }
+    ],
+    [
+      { text: '👥 Реферальная система', callback_data: 'm:ref' },
       { text: '🆘 Поддержка', callback_data: 'm:support' }
     ],
     [{ text: 'ℹ️ Помощь', callback_data: 'm:help2' }]
@@ -341,14 +414,70 @@ function mainMenuFor(id) {
     rows.push([{ text: '⚙️ Админ', callback_data: 'm:admin' }]);
   }
   return {
-    text: 'tmod · мод для TikTok\n\nКупить ключ или получить бесплатный доступ — раздел «Маркет».',
+    text: 'GreiTikTok · мод для TikTok\n\nКупить ключ или получить бесплатный доступ — раздел «Маркет».',
     markup: { inline_keyboard: rows }
+  };
+}
+
+function balanceMenu(chatId) {
+  const u = user(chatId);
+  return {
+    text: `💰 Баланс\n\nДоступно: $${Number(u.balance || 0).toFixed(2)}\n\n` +
+      'Ключи покупаются только с баланса. Пополните и вернитесь в «Маркет».',
+    markup: {
+      inline_keyboard: [
+        [{ text: '➕ Пополнить', callback_data: 'm:topup' }],
+        [{ text: `🔁 Сброс HWID — $${RESET_PRICE.toFixed(2)}`, callback_data: 'm:reset' }],
+        [{ text: '◀️ Назад', callback_data: 'm:home' }]
+      ]
+    }
+  };
+}
+
+function topupMenu() {
+  return {
+    text: '➕ Пополнение баланса\n\nВыберите сумму. Оплата через xRocket (USDT).',
+    markup: {
+      inline_keyboard: [
+        [
+          { text: '$1', callback_data: 'top:1' },
+          { text: '$3', callback_data: 'top:3' },
+          { text: '$5', callback_data: 'top:5' },
+          { text: '$10', callback_data: 'top:10' }
+        ],
+        [{ text: '◀️ Назад', callback_data: 'm:balance' }]
+      ]
+    }
+  };
+}
+
+function referralMenu(chatId) {
+  const id = String(chatId);
+  const u = user(chatId);
+  const invited = Object.keys(state.users)
+    .filter((other) => String(state.users[other].referredBy || '') === id).length;
+  const link = BOT_USERNAME
+    ? `https://t.me/${BOT_USERNAME}?start=ref_${id}`
+    : 'ссылка появится после запуска бота';
+  return {
+    text: `👥 Реферальная система\n\n` +
+      `Ваша ссылка:\n${link}\n\n` +
+      `Приглашено: ${invited}\n` +
+      `Заработано: $${(invited * REFERRAL_BONUS).toFixed(2)}\n\n` +
+      `За каждого друга, который впервые зайдёт по ссылке — +$${REFERRAL_BONUS.toFixed(2)} на баланс.`,
+    markup: {
+      inline_keyboard: [
+        [{ text: '📤 Поделиться ссылкой', url: link.startsWith('http') ? link : 'https://t.me' }],
+        [{ text: '💰 Баланс', callback_data: 'm:balance' }],
+        [{ text: '◀️ Назад', callback_data: 'm:home' }]
+      ]
+    }
   };
 }
 
 function marketMenu() {
   return {
-    text: '🛒 Маркет tmod\n\n' +
+    text: '🛒 Маркет GreiTikTok\n\n' +
       '7 дней — $1\n' +
       '30 дней — $3\n' +
       'Навсегда — $5\n\n' +
@@ -367,26 +496,27 @@ function marketMenu() {
 }
 
 function freeMenu() {
-  const list = FREE_COMMENTS.map((c, i) => `${i + 1}. ${c}`).join('\n');
+  const rows = FREE_COMMENTS.map((c) => ([{
+    text: '📋 ' + c.slice(0, 42),
+    copy_text: { text: c }
+  }]));
+  rows.push([{ text: '📨 Отправить заявку', callback_data: 'free:req' }]);
+  rows.push([{ text: '💬 Написать @Ftor0_0', url: 'https://t.me/Ftor0_0' }]);
+  rows.push(backRow('m:market'));
   return {
     text: '🎁 Бесплатная подписка на 1 день\n\n' +
-      'Условие: написать 15 комментариев по списку и отправить их @Ftor0_0 — он выдаст ключ.\n\n' +
-      'Список комментариев:\n' + list + '\n\n' +
-      'Пример: «это база» — такой короткий живой комментарий подойдёт.',
-    markup: {
-      inline_keyboard: [
-        [{ text: '📨 Отправить заявку', callback_data: 'free:req' }],
-        [{ text: '💬 Написать @Ftor0_0', url: 'https://t.me/Ftor0_0' }],
-        [{ text: '◀️ Назад', callback_data: 'm:market' }]
-      ]
-    }
+      'Условия: написать 15 комментариев — каждый из списка по 3 раза — ' +
+      'и отправить их @Ftor0_0.\n' +
+      'Бесплатный ключ можно получать раз в 2 недели.\n\n' +
+      'Нажми на комментарий, чтобы скопировать его:',
+    markup: { inline_keyboard: rows }
   };
 }
 
 function adminMenu() {
   const free = state.keys.filter((k) => !k.usedBy).length;
   return {
-    text: 'tmod · админ-панель\n' +
+    text: 'GreiTikTok · админ-панель\n' +
       `Устройств: ${state.devices.length}\n` +
       `Ключей: ${state.keys.length} (свободных ${free})\n` +
       `Банов: ${state.bannedKeys.length + state.bannedHwids.length}`,
@@ -562,7 +692,88 @@ async function handleCallback(q) {
     if (data === 'm:home') return show(q, mainMenuFor(q.from.id));
     if (data === 'm:market') return show(q, marketMenu());
     if (data === 'free:get') return show(q, freeMenu());
+    if (data === 'm:balance') return show(q, balanceMenu(q.from.id));
+    if (data === 'm:topup') return show(q, topupMenu());
+    if (data === 'm:ref') return show(q, referralMenu(q.from.id));
+    if (data === 'm:reset') {
+      waiting.set(String(q.from.id), { action: 'reset' });
+      return show(q, {
+        text: '🔁 Сброс HWID\n\nОтправьте ключ, который нужно отвязать от устройства.\n' +
+          `Первый сброс бесплатный, далее $${RESET_PRICE.toFixed(2)} с баланса.`,
+        markup: { inline_keyboard: [backRow('m:balance')] }
+      });
+    }
+    if (data.startsWith('top:check:')) {
+      const id = data.slice(10);
+      const inv = state.invoices.find((i) => i.id === id
+        && String(i.chatId) === String(q.from.id));
+      if (!inv) return show(q, topupMenu());
+      if (inv.status !== 'paid') {
+        const remote = await xrInvoiceStatus(inv.id);
+        if (remote && remote.status === 'paid') creditInvoice(inv);
+      }
+      if (inv.status === 'paid') {
+        return show(q, {
+          text: `✅ Баланс пополнен на $${Number(inv.amount).toFixed(2)}.\n` +
+            `Текущий баланс: $${Number(user(q.from.id).balance).toFixed(2)}`,
+          markup: {
+            inline_keyboard: [
+              [{ text: '🛒 В маркет', callback_data: 'm:market' }],
+              backRow('m:balance')
+            ]
+          }
+        });
+      }
+      return show(q, {
+        text: 'Оплата пока не поступила. Если уже оплатили — подождите минуту и нажмите снова.',
+        markup: {
+          inline_keyboard: [
+            [{ text: '✅ Я оплатил', callback_data: 'top:check:' + id }],
+            backRow('m:balance')
+          ]
+        }
+      });
+    }
+    if (data.startsWith('top:')) {
+      const amount = Number(data.slice(4));
+      if (!amount || amount <= 0) return show(q, topupMenu());
+      const invoice = await xrCreateInvoice(amount, q.from.id);
+      if (!invoice) {
+        return show(q, {
+          text: 'Оплата временно недоступна. Попробуйте позже или напишите @Ftor0_0.',
+          markup: { inline_keyboard: [backRow('m:topup')] }
+        });
+      }
+      state.invoices.push({
+        id: String(invoice.id),
+        chatId: q.from.id,
+        amount,
+        status: 'active',
+        link: invoice.link
+      });
+      save();
+      return show(q, {
+        text: `Счёт на $${amount.toFixed(2)} создан.\n` +
+          'Оплатите по кнопке ниже, затем нажмите «Я оплатил».',
+        markup: {
+          inline_keyboard: [
+            [{ text: '💳 Оплатить через xRocket', url: invoice.link }],
+            [{ text: '✅ Я оплатил', callback_data: 'top:check:' + invoice.id }],
+            backRow('m:balance')
+          ]
+        }
+      });
+    }
     if (data === 'free:req') {
+      const freeUser = user(q.from.id);
+      if (freeUser.freeAt && Date.now() - freeUser.freeAt < FREE_COOLDOWN_MS) {
+        const next = new Date(freeUser.freeAt + FREE_COOLDOWN_MS);
+        const day = next.toLocaleDateString('ru-RU');
+        return show(q, {
+          text: `🎁 Бесплатный ключ уже был получен.\nСледующий можно получить ${day}.`,
+          markup: { inline_keyboard: [backRow('m:market')] }
+        });
+      }
       const order = {
         id: crypto.randomBytes(3).toString('hex'),
         days: 1,
@@ -615,38 +826,32 @@ async function handleCallback(q) {
     if (data.startsWith('plan:')) {
       const plan = PLANS.find((p) => p.id === data.slice(5));
       if (!plan) return show(q, marketMenu());
-      const order = {
-        id: crypto.randomBytes(3).toString('hex'),
-        plan: plan.id,
-        days: plan.days,
-        price: plan.price,
-        chatId: q.from.id,
-        username: q.from.username || '',
-        status: 'new',
-        ts: Date.now()
-      };
-      state.orders.push(order);
-      save();
-      await replyToAdmin(
-        `🛒 Заявка #${order.id}\n` +
-        `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'} — ${plan.price}\n` +
-        `Покупатель: ${order.username ? '@' + order.username : '—'} (${order.chatId})`,
-        {
-          inline_keyboard: [[
-            { text: '✅ Выдать ключ', callback_data: 'ord:' + order.id + ':ok' },
-            { text: '❌ Отменить', callback_data: 'ord:' + order.id + ':no' }
-          ]]
+      const price = PLAN_PRICE[plan.id];
+      const u = user(q.from.id);
+      if (Number(u.balance || 0) + 1e-9 < price) {
+        return show(q, {
+          text: `Недостаточно средств.\n\nТариф: ${plan.days ? plan.days + ' дней' : 'навсегда'} — $${price}\n` +
+            `Ваш баланс: $${Number(u.balance || 0).toFixed(2)}\n\n` +
+            'Пополните баланс и вернитесь в «Маркет».',
+          markup: {
+            inline_keyboard: [
+              [{ text: '➕ Пополнить', callback_data: 'm:topup' }],
+              backRow('m:market')
+            ]
+          }
         });
+      }
+      u.balance = Math.round((u.balance - price) * 100) / 100;
+      const key = newKey(plan.days);
+      const entry = findKey(key);
+      if (entry) entry.chatId = q.from.id;
+      save();
       return show(q, {
-        text: `Заявка #${order.id} создана.\n` +
-          `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'} — ${plan.price}\n\n` +
-          'Оплата через xRocket подключается. Пока свяжитесь с @Ftor0_0 для оплаты и ключа.',
-        markup: {
-          inline_keyboard: [
-            [{ text: '💬 Написать @Ftor0_0', url: 'https://t.me/Ftor0_0' }],
-            backRow('m:market')
-          ]
-        }
+        text: `✅ Оплачено с баланса: $${price}\n\n` +
+          `Ваш ключ: ${key}\n` +
+          `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'}\n` +
+          'Введите его в «Настройки → Мод клиента».',
+        markup: { inline_keyboard: [backRow('m:market')] }
       });
     }
     if (!admin) return;
@@ -661,12 +866,13 @@ async function handleCallback(q) {
         const key = newKey(order.days);
         const entry = findKey(key);
         if (entry) entry.chatId = order.chatId;
+        if (order.type === 'free') user(order.chatId).freeAt = Date.now();
         order.status = 'issued';
         order.key = key;
         save();
         await tg('sendMessage', {
           chat_id: order.chatId,
-          text: `Ваш ключ tmod: ${key}\nТариф: ` +
+          text: `Ваш ключ GreiTikTok: ${key}\nТариф: ` +
             (order.days ? order.days + ' дней' : 'навсегда') +
             '\nВведите его в «Настройки → Мод клиента».'
         });
@@ -901,8 +1107,32 @@ async function handleMessage(msg) {
   const chatId = msg.chat && msg.chat.id;
   if (!chatId) return;
   const text = String(msg.text || '').trim();
-  const menu = mainMenuFor(chatId);
-  if (text === '/start' || text === '/menu' || text === '/help') {
+  if (text.startsWith('/start')) {
+    const payload = text.split(/\s+/)[1] || '';
+    const isNewUser = !state.users[String(chatId)];
+    const current = user(chatId);
+    if (payload.startsWith('ref_') && isNewUser) {
+      const refId = payload.slice(4);
+      if (refId && refId !== String(chatId) && state.users[refId]) {
+        current.referredBy = refId;
+        const referrer = state.users[refId];
+        referrer.balance = Math.round((Number(referrer.balance || 0) + REFERRAL_BONUS) * 100) / 100;
+        save();
+        await tg('sendMessage', {
+          chat_id: refId,
+          text: `🎉 Новый реферал!\n+$${REFERRAL_BONUS.toFixed(2)} зачислено на баланс.`
+        });
+      } else {
+        save();
+      }
+    } else if (isNewUser) {
+      save();
+    }
+    const m = mainMenuFor(chatId);
+    return tg('sendMessage', { chat_id: chatId, text: m.text, reply_markup: m.markup });
+  }
+  if (text === '/menu' || text === '/help') {
+    const menu = mainMenuFor(chatId);
     return tg('sendMessage', { chat_id: chatId, text: menu.text, reply_markup: menu.markup });
   }
   const pendingInput = waiting.get(String(chatId));
@@ -928,6 +1158,45 @@ async function handleMessage(msg) {
       text: `🎟 Промокод активирован!\nВаш ключ: ${key}\n` +
         `Тариф: ${promo.days ? promo.days + ' дней' : 'навсегда'}\n` +
         'Введите его в «Настройки → Мод клиента».'
+    });
+  }
+  if (pendingInput && pendingInput.action === 'reset' && text && !text.startsWith('/')) {
+    waiting.delete(String(chatId));
+    const key = norm(text);
+    const entry = findKey(key);
+    if (!entry || !entry.usedBy) {
+      return tg('sendMessage', { chat_id: chatId, text: 'Ключ не найден или ещё не привязан.' });
+    }
+    if (String(entry.chatId || '') !== String(chatId)) {
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: 'Этот ключ был получен с другого аккаунта Telegram — сброс недоступен.'
+      });
+    }
+    const usedResets = entry.resets || 0;
+    const maxResets = entry.maxResets == null ? 1 : entry.maxResets;
+    let paid = false;
+    if (usedResets >= maxResets) {
+      const u = user(chatId);
+      if (Number(u.balance || 0) < RESET_PRICE) {
+        return tg('sendMessage', {
+          chat_id: chatId,
+          text: `Недостаточно средств: сброс стоит $${RESET_PRICE.toFixed(2)}.\n` +
+            `Баланс: $${Number(u.balance || 0).toFixed(2)}`,
+          reply_markup: { inline_keyboard: [[{ text: '➕ Пополнить', callback_data: 'm:topup' }]] }
+        });
+      }
+      u.balance = Math.round((u.balance - RESET_PRICE) * 100) / 100;
+      paid = true;
+    }
+    entry.usedBy = null;
+    entry.usedAt = 0;
+    entry.resets = usedResets + 1;
+    save();
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: `✅ Привязка ключа сброшена ${paid ? `(списано $${RESET_PRICE.toFixed(2)})` : '(бесплатно)'}.\n` +
+        'Введите ключ на новом устройстве.'
     });
   }
   if (pendingInput && pendingInput.action === 'support' && text && !text.startsWith('/')) {
@@ -1070,12 +1339,44 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
+  if (req.method === 'POST' && url.pathname === '/xrocket/webhook') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 10000) req.destroy();
+    });
+    req.on('end', async () => {
+      try {
+        const data = JSON.parse(body || '{}');
+        if (data.type === 'invoicePay' && data.data && data.data.status === 'paid') {
+          const inv = state.invoices.find((i) => i.id === String(data.data.id));
+          if (inv && creditInvoice(inv)) {
+            await tg('sendMessage', {
+              chat_id: inv.chatId,
+              text: `✅ Баланс пополнен на $${Number(inv.amount).toFixed(2)}.\n` +
+                `Текущий баланс: $${Number(user(inv.chatId).balance).toFixed(2)}`
+            });
+          }
+        }
+      } catch (e) {
+        console.error('webhook parse failed', e);
+      }
+      json(res, 200, { ok: true });
+    });
+    return;
+  }
   json(res, 404, { error: 'not found' });
 });
 
 async function start() {
   await loadRemote();
   if (!Array.isArray(state.keys) || !state.keys.length) state.keys = freshKeys();
+  try {
+    const me = await fetch(`${TG}/getMe`).then((r) => r.json());
+    if (me && me.ok && me.result) BOT_USERNAME = me.result.username || '';
+  } catch (e) {
+    // без username ссылка появится позже
+  }
   server.listen(PORT, () => {
     console.log('tmod admin listening on ' + PORT);
     poll();
@@ -1097,7 +1398,7 @@ function reminderLoop() {
           save();
           await tg('sendMessage', {
             chat_id: entry.chatId,
-            text: `⏳ Подписка tmod истекает через 3 дня (ключ ${entry.key}).\n` +
+            text: `⏳ Подписка GreiTikTok истекает через 3 дня (ключ ${entry.key}).\n` +
               'Продлить можно в «Маркете».',
             reply_markup: { inline_keyboard: [[{ text: '🛒 Маркет', callback_data: 'm:market' }]] }
           });
@@ -1106,7 +1407,7 @@ function reminderLoop() {
           save();
           await tg('sendMessage', {
             chat_id: entry.chatId,
-            text: `⚠️ Подписка tmod истекает завтра (ключ ${entry.key}).\n` +
+            text: `⚠️ Подписка GreiTikTok истекает завтра (ключ ${entry.key}).\n` +
               'Продлить можно в «Маркете».',
             reply_markup: { inline_keyboard: [[{ text: '🛒 Маркет', callback_data: 'm:market' }]] }
           });
