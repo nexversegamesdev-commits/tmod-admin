@@ -24,9 +24,10 @@ if (!BOT_TOKEN || !ADMIN_TOKEN) {
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const LICENSE_SECRET = process.env.LICENSE_SECRET || 'tmod-lic-7f3a91c2d84b';
 const PLANS = [
-  { id: '7', days: 7, price: '$1' },
-  { id: '30', days: 30, price: '$3' },
-  { id: 'forever', days: 0, price: '$5' }
+  { id: '3', days: 3, price: '$1' },
+  { id: '7', days: 7, price: '$2' },
+  { id: '30', days: 30, price: '$7' },
+  { id: 'forever', days: 0, price: '$20' }
 ];
 const FREE_COMMENTS = [
   '@GreiTikTok реально удобный мод 🔥',
@@ -43,7 +44,15 @@ const XROCKET_KEY = process.env.XROCKET_KEY ||
 const XROCKET_BASE = process.env.XROCKET_BASE || 'https://pay.api.xrocket.exchange';
 const XROCKET_WEBHOOK_TOKEN = process.env.XROCKET_WEBHOOK_TOKEN || '';
 const REFERRAL_BONUS = 0.1;
-const PLAN_PRICE = { '7': 1, '30': 3, forever: 5 };
+const PLAN_PRICE = { '3': 1, '7': 2, '30': 7, forever: 20 };
+
+function planWord(days) {
+  if (!days) return 'навсегда';
+  const n = Math.abs(days) % 100;
+  const d = n % 10;
+  const word = n > 10 && n < 20 ? 'дней' : d === 1 ? 'день' : d >= 2 && d <= 4 ? 'дня' : 'дней';
+  return days + ' ' + word;
+}
 const FREE_COOLDOWN_MS = 14 * 86400000;
 const RESET_PRICE = 0.5;
 let BOT_USERNAME = '';
@@ -743,17 +752,18 @@ function profileMenu(chatId) {
 }
 
 function marketMenu() {
+  const labels = PLANS.map((p) => (p.days ? planWord(p.days) : 'Навсегда') + ' — ' + p.price);
+  const planRows = PLANS.map((p) => ([{
+    text: (p.days ? planWord(p.days) : 'Навсегда') + ' — ' + p.price,
+    callback_data: 'plan:' + p.id
+  }]));
   return {
     text: '🛒 Маркет GreiTikTok\n\n' +
-      '7 дней — $1\n' +
-      '30 дней — $3\n' +
-      'Навсегда — $5\n\n' +
+      labels.join('\n') + '\n\n' +
       'Покупка с баланса. Сначала пополните баланс в разделе «Баланс».',
     markup: {
       inline_keyboard: [
-        [{ text: '7 дней — $1', callback_data: 'plan:7' }],
-        [{ text: '30 дней — $3', callback_data: 'plan:30' }],
-        [{ text: 'Навсегда — $5', callback_data: 'plan:forever' }],
+        ...planRows,
         [{ text: '🎁 Получить бесплатно', callback_data: 'free:get' }],
         [{ text: `🔁 Сброс HWID — $${RESET_PRICE.toFixed(2)}`, callback_data: 'm:reset' }],
         [{ text: '📦 +3 сброса HWID — $1', callback_data: 'resetpack' }],
@@ -1289,7 +1299,7 @@ async function handleCallback(q) {
       const balance = Number(u.balance || 0);
       if (balance + 1e-9 < price) {
         return show(q, {
-          text: `Недостаточно средств.\n\nТариф: ${plan.days ? plan.days + ' дней' : 'навсегда'} — $${price}\n` +
+          text: `Недостаточно средств.\n\nТариф: ${planWord(plan.days)} — $${price}\n` +
             `Ваш баланс: $${balance.toFixed(2)}\n\n` +
             'Пополните баланс и вернитесь в «Маркет».',
           markup: {
@@ -1302,7 +1312,7 @@ async function handleCallback(q) {
       }
       return show(q, {
         text: 'Подтвердите покупку\n\n' +
-          `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'}\n` +
+          `Тариф: ${planWord(plan.days)}\n` +
           `Цена: $${price}\n` +
           `Баланс: $${balance.toFixed(2)}\n` +
           `После покупки: $${(balance - price).toFixed(2)}`,
@@ -1334,7 +1344,7 @@ async function handleCallback(q) {
       return show(q, {
         text: `✅ Оплачено с баланса: $${price}\n\n` +
           `Ваш ключ: ${key}\n` +
-          `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'}\n` +
+          `Тариф: ${planWord(plan.days)}\n` +
           'Введите его в «Настройки и конфиденциальность → GreiTikTok».',
         markup: {
           inline_keyboard: [
