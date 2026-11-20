@@ -218,7 +218,23 @@ async function requestAccess(msg) {
 }
 
 function deviceText(d) {
-  return `Устройство\nКлюч: ${d.key}\nМодель: ${d.model}\nAndroid: ${d.android}\nHWID: ${d.hwid}\nIP: ${d.ip}`;
+  return `Устройство\nКлюч: ${d.key}\nМодель: ${d.model}\nAndroid: ${d.android}\n` +
+    `Регион: ${d.geo || '?'}\nHWID: ${d.hwid}\nIP: ${d.ip}`;
+}
+
+async function geoLookup(ip) {
+  try {
+    if (!ip || ip === '?' || ip.startsWith('10.') || ip.startsWith('192.168.')
+        || ip.startsWith('127.') || ip.startsWith('172.')) return '?';
+    const res = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country,region,city`);
+    const json = await res.json();
+    if (json && json.success) {
+      return [json.country, json.region, json.city].filter(Boolean).join(', ') || '?';
+    }
+  } catch (e) {
+    // гео недоступно
+  }
+  return '?';
 }
 
 function deviceButtons(index) {
@@ -245,11 +261,13 @@ async function handleActivation(body, ip) {
   entry.usedBy = hwid;
   entry.usedAt = entry.usedAt || Date.now();
 
+  const geo = await geoLookup(ip);
   const record = {
     key,
     hwid,
     model: String(body.model || '?'),
     android: String(body.android || '?'),
+    geo,
     ip,
     ts: Date.now()
   };
