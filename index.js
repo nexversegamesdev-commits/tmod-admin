@@ -1152,7 +1152,7 @@ async function handleCallback(q) {
         text: `✅ Оплачено с баланса: $${price}\n\n` +
           `Ваш ключ: ${key}\n` +
           `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'}\n` +
-          'Введите его в «Настройки → Мод клиента».',
+          'Введите его в «Настройки и конфиденциальность → GreiTikTok».',
         markup: {
           inline_keyboard: [
             [{ text: '👤 Профиль', callback_data: 'm:profile' }],
@@ -1181,7 +1181,7 @@ async function handleCallback(q) {
           chat_id: order.chatId,
           text: `Ваш ключ GreiTikTok: ${key}\nТариф: ` +
             (order.days ? order.days + ' дней' : 'навсегда') +
-            '\nВведите его в «Настройки → Мод клиента».'
+            '\nВведите его в «Настройки и конфиденциальность → GreiTikTok».'
         });
         await replyToAdmin(`✅ Ключ выдан по заявке #${order.id}: ${key}`);
         await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Ключ выдан' });
@@ -1599,7 +1599,7 @@ async function handleMessage(msg) {
       chat_id: chatId,
       text: `🎟 Промокод активирован!\nВаш ключ: ${key}\n` +
         `Тариф: ${promo.days ? promo.days + ' дней' : 'навсегда'}\n` +
-        'Введите его в «Настройки → Мод клиента».'
+        'Введите его в «Настройки и конфиденциальность → GreiTikTok».'
     });
   }
   if (pendingInput && pendingInput.action === 'topup_amount' && text && !text.startsWith('/')) {
