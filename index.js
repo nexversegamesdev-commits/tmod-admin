@@ -29,13 +29,6 @@ const PLANS = [
   { id: '30', days: 30, price: '$7' },
   { id: 'forever', days: 0, price: '$20' }
 ];
-const FREE_COMMENTS = [
-  '@GreiTikTok реально удобный мод 🔥',
-  'С авто прогревом аккаунта намного удобнее, особенно через @GreiTikTok',
-  'Автопрогрев — имба, @GreiTikTok',
-  '@GreiTikTok стоит попробовать 👀',
-  'Кто ещё не пробовал @GreiTikTok с авто прогревом?'
-];
 const ALLOWED_BUILDS = String(process.env.ALLOWED_BUILDS || '')
   .split(',').map((b) => b.trim()).filter(Boolean);
 const BUILD_ENFORCE = process.env.BUILD_ENFORCE === '1';
@@ -69,6 +62,13 @@ try {
   AVATAR_BYTES = fs.readFileSync(__dirname + '/avatar.png');
 } catch (e) {
   console.error('avatar.png missing');
+}
+const PROMO_URL = 'https://tmod-admin.onrender.com/promo.png';
+let PROMO_BYTES = null;
+try {
+  PROMO_BYTES = fs.readFileSync(__dirname + '/promo.png');
+} catch (e) {
+  console.error('promo.png missing');
 }
 
 function buildAllowed(build) {
@@ -774,23 +774,47 @@ function marketMenu() {
 }
 
 function freeMenu() {
-  const rows = FREE_COMMENTS.map((c) => ([{
-    text: '📋 ' + c.slice(0, 42),
-    copy_text: { text: c }
-  }]));
-  rows.push([{ text: '📨 Оставить заявку', callback_data: 'free:req' }]);
-  rows.push(backRow('m:market'));
   return {
     text: '🎁 Бесплатная подписка на 1 день\n\n' +
       'Что нужно сделать:\n' +
-      '1) Написать 15 комментариев под видео TikTok про автопрогрев аккаунта ' +
-      '(похожие ролики), используя комментарии ниже — каждый по 3 раза.\n' +
-      '2) Сделать скриншот каждого комментария (15 скриншотов).\n' +
-      '3) Нажать «📨 Оставить заявку» и отправить все 15 скриншотов.\n\n' +
-      'Бесплатный ключ можно получать раз в 2 недели.\n\n' +
-      'Нажми на комментарий, чтобы скопировать его:',
-    markup: { inline_keyboard: rows }
+      '1) Сохраните картинку с рекламой мода (она выше).\n' +
+      '2) Под 15 разными видео по теме TikTok, автопрогрева или модов ' +
+      'напишите комментарий и прикрепите эту картинку.\n' +
+      '3) Сделайте скриншот каждого комментария (15 скриншотов).\n' +
+      '4) Нажмите «📨 Оставить заявку» и отправьте все 15 скриншотов.\n\n' +
+      'Бесплатный ключ можно получать раз в 2 недели.',
+    markup: {
+      inline_keyboard: [
+        [{ text: '📨 Оставить заявку', callback_data: 'free:req' }],
+        backRow('m:market')
+      ]
+    }
   };
+}
+
+/** Присылает картинку-рекламу с подписью и кнопками; file_id кэшируется. */
+async function sendPromo(chatId) {
+  const m = freeMenu();
+  const send = (photo) => tg('sendPhoto', {
+    chat_id: chatId,
+    photo,
+    caption: m.text,
+    reply_markup: m.markup
+  });
+  let r = await send(state.promoFileId || PROMO_URL);
+  if ((!r || !r.ok) && state.promoFileId) {
+    r = await send(PROMO_URL);
+  }
+  if (r && r.ok) {
+    const sizes = r.result && r.result.photo;
+    if (sizes && sizes.length) {
+      state.promoFileId = sizes[sizes.length - 1].file_id;
+      save();
+    }
+    return r;
+  }
+  console.error('promo photo failed:', (r && r.description) || 'unknown');
+  return tg('sendMessage', { chat_id: chatId, text: m.text, reply_markup: m.markup });
 }
 
 function adminMenu() {
@@ -1100,7 +1124,7 @@ async function handleCallback(q) {
     }
     if (data === 'm:home') return show(q, mainMenuFor(q.from.id));
     if (data === 'm:market') return show(q, marketMenu());
-    if (data === 'free:get') return show(q, freeMenu());
+    if (data === 'free:get') return sendPromo(q.message.chat.id);
     if (data === 'm:balance') return show(q, balanceMenu(q.from.id));
     if (data === 'm:profile') return show(q, profileMenu(q.from.id));
     if (data === 'm:topup') return show(q, topupMenu());
@@ -1217,7 +1241,7 @@ async function handleCallback(q) {
       }
       waiting.set(String(q.from.id), { action: 'free_shots', photos: [] });
       return show(q, {
-        text: '📸 Отправьте 15 скриншотов ваших комментариев по одному сообщению.\n' +
+        text: '📸 Отправьте 15 скриншотов ваших комментариев с картинкой по одному сообщению.\n' +
           'Я буду считать: 0/15.',
         markup: { inline_keyboard: [backRow('m:market')] }
       });
@@ -1385,7 +1409,7 @@ async function handleCallback(q) {
         await tg('sendMessage', {
           chat_id: order.chatId,
           text: `❌ Заявка #${order.id} отклонена.\n` +
-            'Проверьте, что отправлены 15 скриншотов комментариев под видео про автопрогрев.'
+            'Проверьте, что отправлены 15 скриншотов комментариев с картинкой мода.'
         });
         await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Отменено' });
       }
@@ -2008,6 +2032,18 @@ const server = http.createServer((req, res) => {
       'Access-Control-Allow-Origin': '*'
     });
     return res.end(AVATAR_BYTES);
+  }
+  if (req.method === 'GET' && url.pathname === '/promo.png') {
+    if (!PROMO_BYTES) {
+      res.writeHead(404);
+      return res.end();
+    }
+    res.writeHead(200, {
+      'Content-Type': 'image/png',
+      'Cache-Control': 'public, max-age=86400',
+      'Access-Control-Allow-Origin': '*'
+    });
+    return res.end(PROMO_BYTES);
   }
   if (req.method === 'GET' && url.pathname === '/') {
     return json(res, 200, {
