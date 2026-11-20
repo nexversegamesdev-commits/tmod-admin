@@ -52,8 +52,9 @@ function freshKeys() {
 
 let state = {
   devices: [], keys: freshKeys(), bannedKeys: [], bannedHwids: [],
-  admins: [], pending: [], orders: []
+  admins: [], pending: [], orders: [], promos: []
 };
+const waiting = new Map();
 try {
   const saved = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
   state = Object.assign(state, saved);
@@ -64,6 +65,7 @@ if (!Array.isArray(state.keys) || !state.keys.length) state.keys = freshKeys();
 if (!Array.isArray(state.admins)) state.admins = [];
 if (!Array.isArray(state.pending)) state.pending = [];
 if (!Array.isArray(state.orders)) state.orders = [];
+if (!Array.isArray(state.promos)) state.promos = [];
 for (const id of ENV_ADMINS) {
   if (!state.admins.includes(id)) state.admins.push(id);
 }
@@ -172,6 +174,18 @@ function newKey(days) {
 
 function isExpired(entry) {
   return !!(entry && entry.expiresAt && Date.now() > entry.expiresAt);
+}
+
+function newPromo(days) {
+  for (;;) {
+    let code = '';
+    const bytes = crypto.randomBytes(8);
+    for (let i = 0; i < 8; i++) code += ALPHABET[bytes[i] % ALPHABET.length];
+    if (!state.promos.find((p) => p.code === code) && !findKey(code)) {
+      state.promos.push({ code, days: days || 0, usesLeft: 1, createdAt: Date.now() });
+      return code;
+    }
+  }
 }
 
 function ticketFor(key, hwid) {
@@ -343,6 +357,7 @@ function marketMenu() {
         [{ text: '30 дней — $3', callback_data: 'plan:30' }],
         [{ text: 'Навсегда — $5', callback_data: 'plan:forever' }],
         [{ text: '🎁 Получить бесплатно', callback_data: 'free:get' }],
+        [{ text: '🎟 Ввести промокод', callback_data: 'promo:enter' }],
         [{ text: '◀️ Назад', callback_data: 'm:home' }]
       ]
     }
@@ -358,6 +373,7 @@ function freeMenu() {
       'Пример: «это база» — такой короткий живой комментарий подойдёт.',
     markup: {
       inline_keyboard: [
+        [{ text: '📨 Отправить заявку', callback_data: 'free:req' }],
         [{ text: '💬 Написать @Ftor0_0', url: 'https://t.me/Ftor0_0' }],
         [{ text: '◀️ Назад', callback_data: 'm:market' }]
       ]
@@ -384,9 +400,12 @@ function adminMenu() {
         ],
         [
           { text: '🛒 Заявки', callback_data: 'm:orders' },
-          { text: 'ℹ️ Помощь', callback_data: 'm:help' }
+          { text: '🎟 Промокоды', callback_data: 'm:promos' }
         ],
-        [{ text: '◀️ Меню', callback_data: 'm:home' }]
+        [
+          { text: 'ℹ️ Помощь', callback_data: 'm:help' },
+          { text: '◀️ Меню', callback_data: 'm:home' }
+        ]
       ]
     }
   };
@@ -407,6 +426,27 @@ function ordersMenu() {
     text: fresh.length
       ? 'Новые заявки: ✅ выдать ключ, ❌ отменить.'
       : `Новых заявок нет. Выдано всего: ${issued}.`,
+    markup: { inline_keyboard: rows }
+  };
+}
+
+function promosMenu() {
+  const rows = [
+    [
+      { text: '➕ Промокод 7 дней', callback_data: 'promo:new:7' },
+      { text: '➕ 30 дней', callback_data: 'promo:new:30' }
+    ],
+    [{ text: '➕ Промокод навсегда', callback_data: 'promo:new:0' }]
+  ];
+  state.promos.slice(-15).forEach((p) => {
+    rows.push([{
+      text: `🗑 ${p.code} · ${p.days ? p.days + 'д' : '∞'} · осталось ${p.usesLeft}`,
+      callback_data: 'promo:del:' + p.code
+    }]);
+  });
+  rows.push(backRow('m:admin'));
+  return {
+    text: state.promos.length ? 'Промокоды (тап — удалить):' : 'Промокодов нет.',
     markup: { inline_keyboard: rows }
   };
 }
@@ -502,6 +542,42 @@ async function handleCallback(q) {
     if (data === 'm:home') return show(q, mainMenuFor(q.from.id));
     if (data === 'm:market') return show(q, marketMenu());
     if (data === 'free:get') return show(q, freeMenu());
+    if (data === 'free:req') {
+      const order = {
+        id: crypto.randomBytes(3).toString('hex'),
+        days: 1,
+        price: 'бесплатно',
+        chatId: q.from.id,
+        username: q.from.username || '',
+        status: 'new',
+        type: 'free',
+        ts: Date.now()
+      };
+      state.orders.push(order);
+      save();
+      await replyToAdmin(
+        `🎁 Заявка на бесплатный доступ #${order.id}\n` +
+        `Покупатель: ${order.username ? '@' + order.username : '—'} (${order.chatId})\n` +
+        'Проверьте 15 комментариев и выдайте ключ на 1 день.',
+        {
+          inline_keyboard: [[
+            { text: '✅ Выдать 1 день', callback_data: 'ord:' + order.id + ':ok' },
+            { text: '❌ Отклонить', callback_data: 'ord:' + order.id + ':no' }
+          ]]
+        });
+      return show(q, {
+        text: `Заявка #${order.id} отправлена.\n` +
+          'Админ проверит ваши комментарии и выдаст ключ на 1 день прямо в этот чат.',
+        markup: { inline_keyboard: [backRow('m:market')] }
+      });
+    }
+    if (data === 'promo:enter') {
+      waiting.set(String(q.from.id), { action: 'promo' });
+      return show(q, {
+        text: '🎟 Отправьте промокод одним сообщением — активирую ключ сразу.',
+        markup: { inline_keyboard: [backRow('m:market')] }
+      });
+    }
     if (data === 'm:help2') {
       return show(q, {
         text: 'tmod — мод для TikTok: автопрогрев ленты, лайки, сохранения, '
@@ -556,6 +632,8 @@ async function handleCallback(q) {
       }
       if (parts[2] === 'ok') {
         const key = newKey(order.days);
+        const entry = findKey(key);
+        if (entry) entry.chatId = order.chatId;
         order.status = 'issued';
         order.key = key;
         save();
@@ -581,6 +659,30 @@ async function handleCallback(q) {
     if (data === 'm:bans') return show(q, bansMenu());
     if (data === 'm:admins') return show(q, adminsMenu());
     if (data === 'm:orders') return show(q, ordersMenu());
+    if (data === 'm:promos') return show(q, promosMenu());
+    if (data.startsWith('promo:new:')) {
+      const days = parseInt(data.slice(10), 10) || 0;
+      const code = newPromo(days);
+      save();
+      return show(q, {
+        text: `🎟 Промокод: ${code}\n` +
+          `Тариф: ${days ? days + ' дней' : 'навсегда'}\n` +
+          'Отправьте его покупателю — активирует в «Маркете».',
+        markup: {
+          inline_keyboard: [
+            [{ text: '➕ Ещё', callback_data: 'promo:new:' + days }],
+            backRow('m:promos')
+          ]
+        }
+      });
+    }
+    if (data.startsWith('promo:del:')) {
+      const code = norm(data.slice(10));
+      state.promos = state.promos.filter((p) => norm(p.code) !== code);
+      save();
+      await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Промокод удалён' });
+      return show(q, promosMenu());
+    }
     if (data.startsWith('am:') || data.startsWith('rj:')) {
       const approve = data.startsWith('am:');
       const id = String(data.slice(3)).trim();
@@ -755,6 +857,31 @@ async function handleMessage(msg) {
   if (text === '/start' || text === '/menu' || text === '/help') {
     return tg('sendMessage', { chat_id: chatId, text: menu.text, reply_markup: menu.markup });
   }
+  const pendingInput = waiting.get(String(chatId));
+  if (pendingInput && pendingInput.action === 'promo' && text && !text.startsWith('/')) {
+    waiting.delete(String(chatId));
+    const code = norm(text);
+    const promo = state.promos.find((p) => norm(p.code) === code && p.usesLeft > 0);
+    if (!promo) {
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: '🎟 Промокод не найден или уже использован.',
+        reply_markup: { inline_keyboard: [backRow('m:market')] }
+      });
+    }
+    promo.usesLeft -= 1;
+    if (promo.usesLeft <= 0) state.promos = state.promos.filter((p) => p !== promo);
+    const key = newKey(promo.days);
+    const entry = findKey(key);
+    if (entry) entry.chatId = chatId;
+    save();
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: `🎟 Промокод активирован!\nВаш ключ: ${key}\n` +
+        `Тариф: ${promo.days ? promo.days + ' дней' : 'навсегда'}\n` +
+        'Введите его в «Настройки → Мод клиента».'
+    });
+  }
   if (!isAdmin(chatId)) return;
   if (text === '/devices') {
     const m = devicesMenu();
@@ -866,7 +993,42 @@ async function start() {
     console.log('tmod admin listening on ' + PORT);
     poll();
     selfPing();
+    reminderLoop();
   });
+}
+
+/** Напоминания покупателям об истечении ключа (за 3 дня и за 1 день). */
+function reminderLoop() {
+  setInterval(async () => {
+    const now = Date.now();
+    for (const entry of state.keys) {
+      if (!entry.chatId || !entry.expiresAt) continue;
+      const left = entry.expiresAt - now;
+      try {
+        if (left <= 3 * 86400000 && left > 2 * 86400000 && !entry.reminded3) {
+          entry.reminded3 = true;
+          save();
+          await tg('sendMessage', {
+            chat_id: entry.chatId,
+            text: `⏳ Подписка tmod истекает через 3 дня (ключ ${entry.key}).\n` +
+              'Продлить можно в «Маркете».',
+            reply_markup: { inline_keyboard: [[{ text: '🛒 Маркет', callback_data: 'm:market' }]] }
+          });
+        } else if (left <= 1 * 86400000 && left > 0 && !entry.reminded1) {
+          entry.reminded1 = true;
+          save();
+          await tg('sendMessage', {
+            chat_id: entry.chatId,
+            text: `⚠️ Подписка tmod истекает завтра (ключ ${entry.key}).\n` +
+              'Продлить можно в «Маркете».',
+            reply_markup: { inline_keyboard: [[{ text: '🛒 Маркет', callback_data: 'm:market' }]] }
+          });
+        }
+      } catch (e) {
+        // напоминание не критично
+      }
+    }
+  }, 3600000);
 }
 
 /** Самопинг: Render free засыпает без входящих запросов, свой URL держит сервис живым. */
