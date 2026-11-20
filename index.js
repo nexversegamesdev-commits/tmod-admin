@@ -47,6 +47,13 @@ const PLAN_PRICE = { '7': 1, '30': 3, forever: 5 };
 const FREE_COOLDOWN_MS = 14 * 86400000;
 const RESET_PRICE = 0.5;
 let BOT_USERNAME = '';
+const SUB_CHANNEL = process.env.SUB_CHANNEL || '-1003492504126';
+const SUB_LINK = 'https://t.me/GreiTikTok';
+const SUB_GATE = process.env.SUB_GATE !== '0';
+const SUB_OK_TTL = 10 * 60 * 1000;
+const SUB_NO_TTL = 30 * 1000;
+const subCache = new Map();
+const pendingStart = new Map();
 
 function buildAllowed(build) {
   if (!BUILD_ENFORCE || !ALLOWED_BUILDS.length) return true;
@@ -339,6 +346,58 @@ function replyToAdmin(text, markup) {
     chat_id: id, text, reply_markup: markup
   }));
   return Promise.all(jobs);
+}
+
+function subGateMenu() {
+  return {
+    text: '🔒 Доступ к боту — только для подписчиков канала.\n\n' +
+      '1) Подпишитесь на канал: @GreiTikTok\n' +
+      '2) Нажмите «✅ Проверить подписку».',
+    markup: {
+      inline_keyboard: [
+        [{ text: '📢 Подписаться', url: SUB_LINK }],
+        [{ text: '✅ Проверить подписку', callback_data: 'sub:check' }]
+      ]
+    }
+  };
+}
+
+function sendSubGate(chatId) {
+  const m = subGateMenu();
+  return tg('sendMessage', { chat_id: chatId, text: m.text, reply_markup: m.markup });
+}
+
+/** true — подписан, false — нет. При технической ошибке не блокируем доступ. */
+async function checkSubscription(userId) {
+  try {
+    const r = await tg('getChatMember', { chat_id: SUB_CHANNEL, user_id: userId });
+    if (r && r.ok) {
+      const status = r.result && r.result.status;
+      if (status === 'creator' || status === 'administrator' || status === 'member') return true;
+      if (status === 'restricted') return !!(r.result && r.result.is_member);
+      return false;
+    }
+    const desc = String((r && r.description) || '');
+    if (/member list is inaccessible|chat not found|not enough rights|user not found/i.test(desc)) {
+      console.error('sub check unavailable:', desc);
+      return true;
+    }
+    console.error('sub check failed:', desc);
+    return false;
+  } catch (e) {
+    console.error('sub check error', e);
+    return true;
+  }
+}
+
+async function isSubscribed(userId, force) {
+  if (!SUB_GATE || isAdmin(userId)) return true;
+  const id = String(userId);
+  const cached = subCache.get(id);
+  if (!force && cached && Date.now() - cached.at < cached.ttl) return cached.ok;
+  const ok = await checkSubscription(id);
+  subCache.set(id, { ok, at: Date.now(), ttl: ok ? SUB_OK_TTL : SUB_NO_TTL });
+  return ok;
 }
 
 function isAdmin(id) {
@@ -905,6 +964,32 @@ async function handleCallback(q) {
   const admin = isAdmin(q.from && q.from.id);
   const data = String(q.data || '');
   try {
+    if (data === 'sub:check') {
+      const id = q.from.id;
+      const ok = await isSubscribed(id, true);
+      if (!ok) {
+        await tg('answerCallbackQuery', {
+          callback_query_id: q.id,
+          text: 'Подписка не найдена — подпишитесь на канал и попробуйте снова',
+          show_alert: true
+        });
+        return show(q, subGateMenu());
+      }
+      await tg('answerCallbackQuery', {
+        callback_query_id: q.id,
+        text: '✅ Подписка подтверждена'
+      });
+      const payload = pendingStart.get(String(id)) || '';
+      pendingStart.delete(String(id));
+      return startFlow(id, payload, q);
+    }
+    if (!admin && !(await isSubscribed(q.from.id))) {
+      await tg('answerCallbackQuery', {
+        callback_query_id: q.id,
+        text: 'Сначала подпишитесь на канал @GreiTikTok'
+      });
+      return show(q, subGateMenu());
+    }
     if (data === 'm:home') return show(q, mainMenuFor(q.from.id));
     if (data === 'm:market') return show(q, marketMenu());
     if (data === 'free:get') return show(q, freeMenu());
@@ -1503,9 +1588,44 @@ async function handleCallback(q) {
   }
 }
 
+async function startFlow(chatId, payload, cbq) {
+  const isNewUser = !state.users[String(chatId)];
+  const current = user(chatId);
+  if (payload && payload.startsWith('ref_') && isNewUser) {
+    const refId = payload.slice(4);
+    if (refId && refId !== String(chatId) && state.users[refId]) {
+      current.referredBy = refId;
+      const referrer = state.users[refId];
+      referrer.balance = Math.round((Number(referrer.balance || 0) + REFERRAL_BONUS) * 100) / 100;
+      save();
+      await tg('sendMessage', {
+        chat_id: refId,
+        text: `🎉 Новый реферал!\n+$${REFERRAL_BONUS.toFixed(2)} зачислено на баланс.`
+      });
+    } else {
+      save();
+    }
+  } else if (isNewUser) {
+    save();
+  }
+  const m = mainMenuFor(chatId);
+  if (cbq) return show(cbq, m);
+  return tg('sendMessage', { chat_id: chatId, text: m.text, reply_markup: m.markup });
+}
+
 async function handleMessage(msg) {
   const chatId = msg.chat && msg.chat.id;
   if (!chatId) return;
+  const rawText = String(msg.text || '').trim();
+  if (rawText.startsWith('/start')) {
+    const payload = rawText.split(/\s+/)[1] || '';
+    if (!isAdmin(chatId) && !(await isSubscribed(chatId))) {
+      pendingStart.set(String(chatId), payload);
+      return sendSubGate(chatId);
+    }
+    return startFlow(chatId, payload);
+  }
+  if (!isAdmin(chatId) && !(await isSubscribed(chatId))) return sendSubGate(chatId);
   if (msg.photo && msg.photo.length) {
     const shot = waiting.get(String(chatId));
     if (shot && shot.action === 'free_shots') {
@@ -1532,31 +1652,7 @@ async function handleMessage(msg) {
     }
     return;
   }
-  const text = String(msg.text || '').trim();
-  if (text.startsWith('/start')) {
-    const payload = text.split(/\s+/)[1] || '';
-    const isNewUser = !state.users[String(chatId)];
-    const current = user(chatId);
-    if (payload.startsWith('ref_') && isNewUser) {
-      const refId = payload.slice(4);
-      if (refId && refId !== String(chatId) && state.users[refId]) {
-        current.referredBy = refId;
-        const referrer = state.users[refId];
-        referrer.balance = Math.round((Number(referrer.balance || 0) + REFERRAL_BONUS) * 100) / 100;
-        save();
-        await tg('sendMessage', {
-          chat_id: refId,
-          text: `🎉 Новый реферал!\n+$${REFERRAL_BONUS.toFixed(2)} зачислено на баланс.`
-        });
-      } else {
-        save();
-      }
-    } else if (isNewUser) {
-      save();
-    }
-    const m = mainMenuFor(chatId);
-    return tg('sendMessage', { chat_id: chatId, text: m.text, reply_markup: m.markup });
-  }
+  const text = rawText;
   if (text === '/menu' || text === '/help') {
     const menu = mainMenuFor(chatId);
     return tg('sendMessage', { chat_id: chatId, text: menu.text, reply_markup: menu.markup });
