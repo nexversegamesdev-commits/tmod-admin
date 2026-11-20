@@ -85,9 +85,34 @@ if (!Array.isArray(state.invoices)) state.invoices = [];
 function user(chatId) {
   const id = String(chatId);
   if (!state.users[id]) {
-    state.users[id] = { balance: 0, referredBy: null, freeAt: 0 };
+    state.users[id] = {
+      balance: 0, referredBy: null, freeAt: 0,
+      resetCredits: 0, lowNotifiedAt: 0
+    };
   }
-  return state.users[id];
+  const u = state.users[id];
+  if (u.resetCredits == null) u.resetCredits = 0;
+  if (u.lowNotifiedAt == null) u.lowNotifiedAt = 0;
+  return u;
+}
+
+/** Уведомление о низком балансе после списаний (не чаще раза в сутки). */
+async function checkLowBalance(chatId) {
+  const u = user(chatId);
+  const balance = Number(u.balance || 0);
+  if (balance >= 1) {
+    u.lowNotifiedAt = 0;
+    return;
+  }
+  if (Date.now() - Number(u.lowNotifiedAt || 0) < 86400000) return;
+  u.lowNotifiedAt = Date.now();
+  save();
+  await tg('sendMessage', {
+    chat_id: chatId,
+    text: `⚠️ Баланс ниже $1 (сейчас $${balance.toFixed(2)}).\n` +
+      'Пополните, чтобы купить или продлить подписку.',
+    reply_markup: { inline_keyboard: [[{ text: '➕ Пополнить', callback_data: 'm:topup' }]] }
+  });
 }
 for (const id of ENV_ADMINS) {
   if (!state.admins.includes(id)) state.admins.push(id);
@@ -206,7 +231,25 @@ function newPromo(days) {
     const bytes = crypto.randomBytes(8);
     for (let i = 0; i < 8; i++) code += ALPHABET[bytes[i] % ALPHABET.length];
     if (!state.promos.find((p) => p.code === code) && !findKey(code)) {
-      state.promos.push({ code, days: days || 0, usesLeft: 1, createdAt: Date.now() });
+      state.promos.push({
+        code, type: 'key', days: days || 0,
+        usesLeft: 1, createdAt: Date.now()
+      });
+      return code;
+    }
+  }
+}
+
+function newPromoBalance(amount) {
+  for (;;) {
+    let code = '';
+    const bytes = crypto.randomBytes(8);
+    for (let i = 0; i < 8; i++) code += ALPHABET[bytes[i] % ALPHABET.length];
+    if (!state.promos.find((p) => p.code === code) && !findKey(code)) {
+      state.promos.push({
+        code, type: 'balance', amount: amount,
+        usesLeft: 1, createdAt: Date.now()
+      });
       return code;
     }
   }
@@ -276,6 +319,7 @@ function creditInvoice(invoice) {
   if (!invoice || invoice.status === 'paid') return false;
   const u = user(invoice.chatId);
   u.balance = Math.round((u.balance + invoice.amount) * 100) / 100;
+  if (u.balance >= 1) u.lowNotifiedAt = 0;
   invoice.status = 'paid';
   save();
   return true;
@@ -565,6 +609,7 @@ function marketMenu() {
         [{ text: '🎁 Получить бесплатно', callback_data: 'free:get' }],
         [{ text: '🎟 Ввести промокод', callback_data: 'promo:enter' }],
         [{ text: `🔁 Сброс HWID — $${RESET_PRICE.toFixed(2)}`, callback_data: 'm:reset' }],
+        [{ text: '📦 +3 сброса HWID — $1', callback_data: 'resetpack' }],
         [{ text: '◀️ Назад', callback_data: 'm:home' }]
       ]
     }
@@ -611,13 +656,14 @@ function adminMenu() {
           { text: '🎟 Промокоды', callback_data: 'm:promos' }
         ],
         [
-          { text: '💰 Балансы', callback_data: 'm:balances' },
-          { text: '🎫 Тикеты', callback_data: 'm:tickets' }
+          { text: '👥 Пользователи', callback_data: 'm:users' },
+          { text: '💰 Балансы', callback_data: 'm:balances' }
         ],
         [
-          { text: 'ℹ️ Помощь', callback_data: 'm:help' },
-          { text: '◀️ Меню', callback_data: 'm:home' }
-        ]
+          { text: '🎫 Тикеты', callback_data: 'm:tickets' },
+          { text: 'ℹ️ Помощь', callback_data: 'm:help' }
+        ],
+        [{ text: '◀️ Меню', callback_data: 'm:home' }]
       ]
     }
   };
@@ -648,11 +694,18 @@ function promosMenu() {
       { text: '➕ Промокод 7 дней', callback_data: 'promo:new:7' },
       { text: '➕ 30 дней', callback_data: 'promo:new:30' }
     ],
-    [{ text: '➕ Промокод навсегда', callback_data: 'promo:new:0' }]
+    [{ text: '➕ Промокод навсегда', callback_data: 'promo:new:0' }],
+    [
+      { text: '💵 Баланс $0.5', callback_data: 'promo:newbal:0.5' },
+      { text: '💵 Баланс $1', callback_data: 'promo:newbal:1' }
+    ]
   ];
   state.promos.slice(-15).forEach((p) => {
+    const label = p.type === 'balance'
+      ? `$${Number(p.amount).toFixed(2)}`
+      : (p.days ? p.days + 'д' : '∞');
     rows.push([{
-      text: `🗑 ${p.code} · ${p.days ? p.days + 'д' : '∞'} · осталось ${p.usesLeft}`,
+      text: `🗑 ${p.code} · ${label} · осталось ${p.usesLeft}`,
       callback_data: 'promo:del:' + p.code
     }]);
   });
@@ -677,6 +730,58 @@ function ticketsMenu() {
       ? 'Открытые тикеты:'
       : 'Открытых тикетов нет.',
     markup: { inline_keyboard: rows }
+  };
+}
+
+function usersMenu() {
+  const rows = [];
+  Object.keys(state.users).slice(-10).forEach((id) => {
+    const u = state.users[id];
+    rows.push([{
+      text: `👤 ${id} · $${Number(u.balance || 0).toFixed(2)}`,
+      callback_data: 'user:' + id
+    }]);
+  });
+  rows.push(backRow('m:admin'));
+  return {
+    text: rows.length > 1 ? 'Пользователи (тап — управление):' : 'Пользователей нет.',
+    markup: { inline_keyboard: rows }
+  };
+}
+
+function userMenu(id) {
+  const u = user(id);
+  const mine = state.keys.filter((k) => String(k.chatId || '') === String(id));
+  mine.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const key = mine.find((k) => !k.expiresAt || k.expiresAt > Date.now()) || mine[0];
+  const lines = [
+    `👤 Пользователь ${id}`,
+    `Баланс: $${Number(u.balance || 0).toFixed(2)}`,
+    `Сбросы из пакета: ${Number(u.resetCredits || 0)}`
+  ];
+  if (key) {
+    const until = key.expiresAt
+      ? new Date(key.expiresAt).toLocaleDateString('ru-RU') : 'бессрочно';
+    lines.push(`Ключ: ${key.key}`);
+    lines.push(`До: ${until}`);
+  } else {
+    lines.push('Ключа нет');
+  }
+  return {
+    text: lines.join('\n'),
+    markup: {
+      inline_keyboard: [
+        [
+          { text: '🎁 Выдать 7 дней', callback_data: 'uissue:' + id + ':7' },
+          { text: '🎁 30 дней', callback_data: 'uissue:' + id + ':30' }
+        ],
+        [
+          { text: '⏳ Продлить +7', callback_data: 'uext:' + id + ':7' },
+          { text: '⏳ +30', callback_data: 'uext:' + id + ':30' }
+        ],
+        [{ text: '◀️ Назад', callback_data: 'm:users' }]
+      ]
+    }
   };
 }
 
@@ -794,6 +899,29 @@ async function handleCallback(q) {
     if (data === 'm:profile') return show(q, profileMenu(q.from.id));
     if (data === 'm:topup') return show(q, topupMenu());
     if (data === 'm:ref') return show(q, referralMenu(q.from.id));
+    if (data === 'resetpack') {
+      const u = user(q.from.id);
+      if (Number(u.balance || 0) < 1) {
+        return show(q, {
+          text: `Пакет «+3 сброса HWID» стоит $1.\nБаланс: $${Number(u.balance || 0).toFixed(2)}`,
+          markup: {
+            inline_keyboard: [
+              [{ text: '➕ Пополнить', callback_data: 'm:topup' }],
+              backRow('m:market')
+            ]
+          }
+        });
+      }
+      u.balance = Math.round((u.balance - 1) * 100) / 100;
+      u.resetCredits = (u.resetCredits || 0) + 3;
+      save();
+      await checkLowBalance(q.from.id);
+      return show(q, {
+        text: `✅ Куплено 3 сброса HWID.\nОсталось сбросов: ${u.resetCredits}\n` +
+          `Баланс: $${Number(u.balance).toFixed(2)}`,
+        markup: { inline_keyboard: [backRow('m:market')] }
+      });
+    }
     if (data === 'm:reset') {
       waiting.set(String(q.from.id), { action: 'reset' });
       return show(q, {
@@ -979,6 +1107,7 @@ async function handleCallback(q) {
       const entry = findKey(key);
       if (entry) entry.chatId = q.from.id;
       save();
+      await checkLowBalance(q.from.id);
       return show(q, {
         text: `✅ Оплачено с баланса: $${price}\n\n` +
           `Ваш ключ: ${key}\n` +
@@ -1033,6 +1162,52 @@ async function handleCallback(q) {
     if (data === 'm:promos') return show(q, promosMenu());
     if (data === 'm:tickets') return show(q, ticketsMenu());
     if (data === 'm:balances') return show(q, balancesMenu());
+    if (data === 'm:users') return show(q, usersMenu());
+    if (data.startsWith('user:')) {
+      return show(q, userMenu(String(data.slice(5))));
+    }
+    if (data.startsWith('uissue:')) {
+      const parts = data.split(':');
+      const target = String(parts[1]);
+      const days = parseInt(parts[2], 10) || 0;
+      const key = newKey(days);
+      const entry = findKey(key);
+      if (entry) entry.chatId = target;
+      save();
+      await tg('sendMessage', {
+        chat_id: target,
+        text: `🎁 Вам выдан ключ GreiTikTok: ${key}\n` +
+          `Тариф: ${days ? days + ' дней' : 'навсегда'}`
+      });
+      await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Ключ выдан' });
+      return show(q, userMenu(target));
+    }
+    if (data.startsWith('uext:')) {
+      const parts = data.split(':');
+      const target = String(parts[1]);
+      const days = parseInt(parts[2], 10) || 0;
+      const mine = state.keys.filter((k) => String(k.chatId || '') === target);
+      mine.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      const entry = mine.find((k) => !k.expiresAt || k.expiresAt > Date.now()) || mine[0];
+      if (!entry) {
+        await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'У пользователя нет ключа' });
+        return show(q, userMenu(target));
+      }
+      if (!entry.expiresAt) {
+        await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Ключ бессрочный' });
+        return show(q, userMenu(target));
+      }
+      entry.expiresAt += days * 86400000;
+      entry.planDays = Number(entry.planDays || 0) + days;
+      save();
+      await tg('sendMessage', {
+        chat_id: target,
+        text: `⏳ Подписка продлена на ${days} дн.\n` +
+          `Ключ: ${entry.key}\nДо: ${new Date(entry.expiresAt).toLocaleDateString('ru-RU')}`
+      });
+      await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Продлено' });
+      return show(q, userMenu(target));
+    }
     if (data === 'nop') {
       await tg('answerCallbackQuery', { callback_query_id: q.id, text: '' });
       return;
@@ -1089,6 +1264,22 @@ async function handleCallback(q) {
         markup: {
           inline_keyboard: [
             [{ text: '➕ Ещё', callback_data: 'promo:new:' + days }],
+            backRow('m:promos')
+          ]
+        }
+      });
+    }
+    if (data.startsWith('promo:newbal:')) {
+      const amount = Number(data.slice(13));
+      if (!amount || amount <= 0) return show(q, promosMenu());
+      const code = newPromoBalance(amount);
+      save();
+      return show(q, {
+        text: `💵 Промокод на баланс: ${code}\nСумма: $${amount.toFixed(2)}\n` +
+          'Отправьте его покупателю — активирует в «Маркете».',
+        markup: {
+          inline_keyboard: [
+            [{ text: '➕ Ещё', callback_data: 'promo:newbal:' + amount }],
             backRow('m:promos')
           ]
         }
@@ -1313,6 +1504,22 @@ async function handleMessage(msg) {
     }
     promo.usesLeft -= 1;
     if (promo.usesLeft <= 0) state.promos = state.promos.filter((p) => p !== promo);
+    if (promo.type === 'balance') {
+      const u = user(chatId);
+      u.balance = Math.round((Number(u.balance || 0) + Number(promo.amount)) * 100) / 100;
+      save();
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: `🎟 Промокод активирован!\n+$${Number(promo.amount).toFixed(2)} на баланс.\n` +
+          `Текущий баланс: $${Number(u.balance).toFixed(2)}`,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🛒 Маркет', callback_data: 'm:market' }],
+            [{ text: '💰 Баланс', callback_data: 'm:balance' }]
+          ]
+        }
+      });
+    }
     const key = newKey(promo.days);
     const entry = findKey(key);
     if (entry) entry.chatId = chatId;
@@ -1378,26 +1585,38 @@ async function handleMessage(msg) {
     const usedResets = entry.resets || 0;
     const maxResets = entry.maxResets == null ? 1 : entry.maxResets;
     let paid = false;
+    let usedCredit = false;
     if (usedResets >= maxResets) {
       const u = user(chatId);
-      if (Number(u.balance || 0) < RESET_PRICE) {
+      if (Number(u.resetCredits || 0) > 0) {
+        u.resetCredits = Number(u.resetCredits) - 1;
+        usedCredit = true;
+      } else if (Number(u.balance || 0) >= RESET_PRICE) {
+        u.balance = Math.round((u.balance - RESET_PRICE) * 100) / 100;
+        paid = true;
+      } else {
         return tg('sendMessage', {
           chat_id: chatId,
-          text: `Недостаточно средств: сброс стоит $${RESET_PRICE.toFixed(2)}.\n` +
-            `Баланс: $${Number(u.balance || 0).toFixed(2)}`,
-          reply_markup: { inline_keyboard: [[{ text: '➕ Пополнить', callback_data: 'm:topup' }]] }
+          text: `Недостаточно средств: сброс стоит $${RESET_PRICE.toFixed(2)}, ` +
+            `либо пакет «3 сброса» за $1.\nБаланс: $${Number(u.balance || 0).toFixed(2)}`,
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '➕ Пополнить', callback_data: 'm:topup' }],
+              [{ text: '📦 +3 сброса — $1', callback_data: 'resetpack' }]
+            ]
+          }
         });
       }
-      u.balance = Math.round((u.balance - RESET_PRICE) * 100) / 100;
-      paid = true;
     }
     entry.usedBy = null;
     entry.usedAt = 0;
     entry.resets = usedResets + 1;
     save();
+    if (paid) await checkLowBalance(chatId);
     return tg('sendMessage', {
       chat_id: chatId,
-      text: `✅ Привязка ключа сброшена ${paid ? `(списано $${RESET_PRICE.toFixed(2)})` : '(бесплатно)'}.\n` +
+      text: `✅ Привязка ключа сброшена ` +
+        `${paid ? `(списано $${RESET_PRICE.toFixed(2)})` : usedCredit ? '(списан 1 сброс из пакета)' : '(бесплатно)'}.\n` +
         'Введите ключ на новом устройстве.'
     });
   }
@@ -1639,6 +1858,14 @@ function reminderLoop() {
             chat_id: entry.chatId,
             text: `⚠️ Подписка GreiTikTok истекает завтра (ключ ${entry.key}).\n` +
               'Продлить можно в «Маркете».',
+            reply_markup: { inline_keyboard: [[{ text: '🛒 Маркет', callback_data: 'm:market' }]] }
+          });
+        } else if (left <= 6 * 3600000 && left > 0 && !entry.reminded6) {
+          entry.reminded6 = true;
+          save();
+          await tg('sendMessage', {
+            chat_id: entry.chatId,
+            text: `⏰ Подписка GreiTikTok истекает менее чем через 6 часов (ключ ${entry.key}).`,
             reply_markup: { inline_keyboard: [[{ text: '🛒 Маркет', callback_data: 'm:market' }]] }
           });
         }
