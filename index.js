@@ -22,6 +22,17 @@ if (!BOT_TOKEN || !ADMIN_TOKEN) {
 }
 
 const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const LICENSE_SECRET = process.env.LICENSE_SECRET || 'tmod-lic-7f3a91c2d84b';
+const PLANS = [
+  { id: '7', days: 7, price: '$1' },
+  { id: '30', days: 30, price: '$3' },
+  { id: 'forever', days: 0, price: '$5' }
+];
+const FREE_COMMENTS = [
+  'это база', 'ну топчик', 'вот это да', 'очень сильно', 'просто огонь',
+  'согласен полностью', 'орнул с этого', 'жесть как так', 'кайф', 'топ контент',
+  'сильно', 'ахахах', 'что это было', 'не ожидал', 'залетаю'
+];
 const SEED_KEYS = [
   'Q2M7XK4P', 'R8TZ3WNF', 'B5YK9HJD', 'V6NX2QSL', 'C9PM4RTW',
   'D3QW8ZKX', 'F7HJ2MBN', 'G4XP9KRT', 'J6BR3VQY', 'L8MN5XZS'
@@ -129,16 +140,33 @@ function isBanned(hwid, key) {
     (k && state.bannedKeys.map(norm).includes(k));
 }
 
-function newKey() {
+function newKey(days) {
   for (;;) {
     let key = '';
     const bytes = crypto.randomBytes(8);
     for (let i = 0; i < 8; i++) key += ALPHABET[bytes[i] % ALPHABET.length];
     if (!findKey(key)) {
-      state.keys.push({ key, usedBy: null, usedAt: 0, createdAt: Date.now() });
+      const now = Date.now();
+      state.keys.push({
+        key,
+        usedBy: null,
+        usedAt: 0,
+        createdAt: now,
+        expiresAt: days ? now + days * 86400000 : 0
+      });
       return key;
     }
   }
+}
+
+function isExpired(entry) {
+  return !!(entry && entry.expiresAt && Date.now() > entry.expiresAt);
+}
+
+function ticketFor(key, hwid) {
+  return crypto.createHmac('sha256', LICENSE_SECRET)
+    .update(key + '|' + hwid)
+    .digest('hex');
 }
 
 async function tg(method, payload) {
@@ -212,6 +240,7 @@ async function handleActivation(body, ip) {
   if (isBanned(hwid, key)) return { ok: false, error: 'banned' };
   const entry = findKey(key);
   if (!entry) return { ok: false, error: 'invalid' };
+  if (isExpired(entry)) return { ok: false, error: 'banned' };
   if (entry.usedBy && norm(entry.usedBy) !== hwid) return { ok: false, error: 'used' };
   entry.usedBy = hwid;
   entry.usedAt = entry.usedAt || Date.now();
@@ -233,7 +262,7 @@ async function handleActivation(body, ip) {
   }
   save();
   await replyToAdmin(deviceText(record), deviceButtons(index));
-  return { ok: true };
+  return { ok: true, ticket: ticketFor(key, hwid) };
 }
 
 function handleCheck(hwid, key) {
@@ -243,11 +272,63 @@ function handleCheck(hwid, key) {
   if (!k) return { banned: false };
   const entry = findKey(k);
   if (!entry) return { banned: true, reason: 'revoked' };
+  if (isExpired(entry)) return { banned: true, reason: 'expired' };
   if (entry.usedBy && norm(entry.usedBy) !== h) return { banned: true, reason: 'used' };
   return { banned: false };
 }
 
-function mainMenu() {
+function mainMenuFor(id) {
+  const rows = [
+    [
+      { text: '🛒 Маркет', callback_data: 'm:market' },
+      { text: 'ℹ️ Помощь', callback_data: 'm:help2' }
+    ]
+  ];
+  if (isAdmin(id)) {
+    rows.push([{ text: '⚙️ Админ', callback_data: 'm:admin' }]);
+  }
+  return {
+    text: 'tmod · мод для TikTok\n\nКупить ключ или получить бесплатный доступ — раздел «Маркет».',
+    markup: { inline_keyboard: rows }
+  };
+}
+
+function marketMenu() {
+  return {
+    text: '🛒 Маркет tmod\n\n' +
+      '7 дней — $1\n' +
+      '30 дней — $3\n' +
+      'Навсегда — $5\n\n' +
+      'Оплата подключается. Пока ключ можно получить у @Ftor0_0.',
+    markup: {
+      inline_keyboard: [
+        [{ text: '7 дней — $1', callback_data: 'plan:7' }],
+        [{ text: '30 дней — $3', callback_data: 'plan:30' }],
+        [{ text: 'Навсегда — $5', callback_data: 'plan:forever' }],
+        [{ text: '🎁 Получить бесплатно', callback_data: 'free:get' }],
+        [{ text: '◀️ Назад', callback_data: 'm:home' }]
+      ]
+    }
+  };
+}
+
+function freeMenu() {
+  const list = FREE_COMMENTS.map((c, i) => `${i + 1}. ${c}`).join('\n');
+  return {
+    text: '🎁 Бесплатная подписка на 1 день\n\n' +
+      'Условие: написать 15 комментариев по списку и отправить их @Ftor0_0 — он выдаст ключ.\n\n' +
+      'Список комментариев:\n' + list + '\n\n' +
+      'Пример: «это база» — такой короткий живой комментарий подойдёт.',
+    markup: {
+      inline_keyboard: [
+        [{ text: '💬 Написать @Ftor0_0', url: 'https://t.me/Ftor0_0' }],
+        [{ text: '◀️ Назад', callback_data: 'm:market' }]
+      ]
+    }
+  };
+}
+
+function adminMenu() {
   const free = state.keys.filter((k) => !k.usedBy).length;
   return {
     text: 'tmod · админ-панель\n' +
@@ -264,7 +345,10 @@ function mainMenu() {
           { text: '🚫 Бан-лист', callback_data: 'm:bans' },
           { text: '👤 Админы', callback_data: 'm:admins' }
         ],
-        [{ text: 'ℹ️ Помощь', callback_data: 'm:help' }]
+        [
+          { text: 'ℹ️ Помощь', callback_data: 'm:help' },
+          { text: '◀️ Меню', callback_data: 'm:home' }
+        ]
       ]
     }
   };
@@ -275,7 +359,7 @@ function adminsMenu() {
     text: '🗑 ' + id,
     callback_data: 'rmadm:' + id
   }]);
-  rows.push(backRow('m:home'));
+  rows.push(backRow('m:admin'));
   return {
     text: 'Админы бота (нажми ID, чтобы снять доступ):',
     markup: { inline_keyboard: rows }
@@ -293,10 +377,14 @@ function keysMenu() {
           { text: '➕ Создать ×5', callback_data: 'k:new5' }
         ],
         [
+          { text: '⏳ 7 дней', callback_data: 'k:new7' },
+          { text: '⏳ 30 дней', callback_data: 'k:new30' }
+        ],
+        [
           { text: '📋 Свободные', callback_data: 'k:free' },
           { text: '📋 Все ключи', callback_data: 'k:all' }
         ],
-        [{ text: '◀️ Назад', callback_data: 'm:home' }]
+        [{ text: '◀️ Назад', callback_data: 'm:admin' }]
       ]
     }
   };
@@ -315,7 +403,7 @@ function devicesMenu() {
       callback_data: 'd:' + idx
     }]);
   });
-  rows.push(backRow('m:home'));
+  rows.push(backRow('m:admin'));
   return {
     text: state.devices.length ? 'Устройства (последние 10):' : 'Устройств пока нет.',
     markup: { inline_keyboard: rows }
@@ -330,7 +418,7 @@ function bansMenu() {
   state.bannedHwids.forEach((_, i) => {
     rows.push([{ text: '✅ ' + String(state.bannedHwids[i]).slice(0, 18) + '…', callback_data: 'ub:sh:' + i }]);
   });
-  rows.push(backRow('m:home'));
+  rows.push(backRow('m:admin'));
   const total = state.bannedKeys.length + state.bannedHwids.length;
   return {
     text: total ? 'Бан-лист (нажми, чтобы разбанить):' : 'Бан-лист пуст.',
@@ -351,10 +439,35 @@ async function show(cbq, menu) {
 }
 
 async function handleCallback(q) {
-  if (!isAdmin(q.from && q.from.id)) return;
+  const admin = isAdmin(q.from && q.from.id);
   const data = String(q.data || '');
   try {
-    if (data === 'm:home') return show(q, mainMenu());
+    if (data === 'm:home') return show(q, mainMenuFor(q.from.id));
+    if (data === 'm:market') return show(q, marketMenu());
+    if (data === 'free:get') return show(q, freeMenu());
+    if (data === 'm:help2') {
+      return show(q, {
+        text: 'tmod — мод для TikTok: автопрогрев ленты, лайки, сохранения, '
+          + 'комментарии по теме и ИИ-чекер.\n\nКлючи и бесплатный доступ — в «Маркете».',
+        markup: { inline_keyboard: [backRow('m:home')] }
+      });
+    }
+    if (data.startsWith('plan:')) {
+      const plan = PLANS.find((p) => p.id === data.slice(5));
+      if (!plan) return show(q, marketMenu());
+      return show(q, {
+        text: `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'} — ${plan.price}\n\n` +
+          'Оплата через xRocket подключается. Пока напишите @Ftor0_0 — ключ выдадут вручную.',
+        markup: {
+          inline_keyboard: [
+            [{ text: '💬 Написать @Ftor0_0', url: 'https://t.me/Ftor0_0' }],
+            backRow('m:market')
+          ]
+        }
+      });
+    }
+    if (!admin) return;
+    if (data === 'm:admin') return show(q, adminMenu());
     if (data === 'm:keys') return show(q, keysMenu());
     if (data === 'm:devs') return show(q, devicesMenu());
     if (data === 'm:bans') return show(q, bansMenu());
@@ -393,16 +506,18 @@ async function handleCallback(q) {
         text: 'Разделы кнопками:\n• Ключи — создание и удаление\n' +
           '• Устройства — карточка и бан по HWID/ключу\n' +
           '• Бан-лист — разбан кнопкой',
-        markup: { inline_keyboard: [backRow('m:home')] }
+        markup: { inline_keyboard: [backRow('m:admin')] }
       });
     }
-    if (data === 'k:new' || data === 'k:new5') {
+    if (data.startsWith('k:new')) {
       const count = data === 'k:new5' ? 5 : 1;
+      const days = data === 'k:new7' ? 7 : data === 'k:new30' ? 30 : 0;
       const created = [];
-      for (let i = 0; i < count; i++) created.push(newKey());
+      for (let i = 0; i < count; i++) created.push(newKey(days));
       save();
       return show(q, {
-        text: 'Новые ключи:\n' + created.map((k) => '• ' + k).join('\n'),
+        text: (days ? `Новые ключи на ${days} дн.:\n` : 'Новые ключи (навсегда):\n') +
+          created.map((k) => '• ' + k).join('\n'),
         markup: {
           inline_keyboard: [
             [{ text: '➕ Ещё', callback_data: 'k:new' }],
@@ -483,16 +598,14 @@ async function handleCallback(q) {
 }
 
 async function handleMessage(msg) {
-  if (!isAdmin(msg.chat && msg.chat.id)) {
-    await requestAccess(msg);
-    return;
-  }
+  const chatId = msg.chat && msg.chat.id;
+  if (!chatId) return;
   const text = String(msg.text || '').trim();
-  const chatId = msg.chat.id;
-  const menu = mainMenu();
+  const menu = mainMenuFor(chatId);
   if (text === '/start' || text === '/menu' || text === '/help') {
     return tg('sendMessage', { chat_id: chatId, text: menu.text, reply_markup: menu.markup });
   }
+  if (!isAdmin(chatId)) return;
   if (text === '/devices') {
     const m = devicesMenu();
     return tg('sendMessage', { chat_id: chatId, text: m.text, reply_markup: m.markup });
