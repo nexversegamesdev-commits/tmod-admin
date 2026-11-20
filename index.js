@@ -186,6 +186,7 @@ function newKey(days) {
         usedBy: null,
         usedAt: 0,
         createdAt: now,
+        planDays: days || 0,
         expiresAt: days ? now + days * 86400000 : 0,
         resets: 0,
         maxResets: 1
@@ -421,10 +422,13 @@ function mainMenuFor(id) {
       { text: '💰 Баланс', callback_data: 'm:balance' }
     ],
     [
-      { text: '👥 Реферальная система', callback_data: 'm:ref' },
-      { text: '🆘 Поддержка', callback_data: 'm:support' }
+      { text: '👤 Профиль', callback_data: 'm:profile' },
+      { text: '👥 Реферальная система', callback_data: 'm:ref' }
     ],
-    [{ text: 'ℹ️ Помощь', callback_data: 'm:help2' }]
+    [
+      { text: '🆘 Поддержка', callback_data: 'm:support' },
+      { text: 'ℹ️ Помощь', callback_data: 'm:help2' }
+    ]
   ];
   if (isAdmin(id)) {
     rows.push([{ text: '⚙️ Админ', callback_data: 'm:admin' }]);
@@ -485,6 +489,61 @@ function referralMenu(chatId) {
       inline_keyboard: [
         [{ text: '📤 Поделиться ссылкой', url: link.startsWith('http') ? link : 'https://t.me' }],
         [{ text: '💰 Баланс', callback_data: 'm:balance' }],
+        [{ text: '◀️ Назад', callback_data: 'm:home' }]
+      ]
+    }
+  };
+}
+
+function profileMenu(chatId) {
+  const id = String(chatId);
+  const u = user(chatId);
+  const mine = state.keys.filter((k) => String(k.chatId || '') === id);
+  mine.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const now = Date.now();
+  const active = mine.find((k) => !k.expiresAt || k.expiresAt > now) || mine[0];
+
+  const lines = ['👤 Профиль', ''];
+  if (!active) {
+    lines.push('Подписки пока нет.');
+  } else {
+    const planDays = active.planDays
+      || (active.expiresAt ? Math.round((active.expiresAt - (active.createdAt || 0)) / 86400000) : 0);
+    lines.push('Ключ: ' + active.key);
+    lines.push('Подписка: ' + (planDays ? planDays + ' дней' : 'навсегда'));
+    if (!active.usedBy) {
+      lines.push('Статус: ожидает активации');
+    } else if (active.expiresAt && active.expiresAt <= now) {
+      lines.push('Статус: истекла');
+    } else {
+      lines.push('Статус: активна');
+    }
+    if (active.expiresAt) {
+      const left = Math.max(0, Math.ceil((active.expiresAt - now) / 86400000));
+      const until = new Date(active.expiresAt).toLocaleDateString('ru-RU');
+      lines.push(`Осталось: ${left} дн. (до ${until})`);
+    } else {
+      lines.push('Осталось: бессрочно');
+    }
+    const device = state.devices.find((d) => d.key === active.key);
+    if (device) {
+      lines.push(`Устройство: ${device.model} · ${String(device.hwid).slice(0, 10)}…`);
+    } else if (active.usedBy) {
+      lines.push('Устройство: ' + String(active.usedBy).slice(0, 10) + '…');
+    } else {
+      lines.push('Устройство: ещё не привязано');
+    }
+  }
+  lines.push('', `Баланс: $${Number(u.balance || 0).toFixed(2)}`);
+
+  return {
+    text: lines.join('\n'),
+    markup: {
+      inline_keyboard: [
+        [
+          { text: '💰 Баланс', callback_data: 'm:balance' },
+          { text: '🛒 Маркет', callback_data: 'm:market' }
+        ],
         [{ text: '◀️ Назад', callback_data: 'm:home' }]
       ]
     }
@@ -732,6 +791,7 @@ async function handleCallback(q) {
     if (data === 'm:market') return show(q, marketMenu());
     if (data === 'free:get') return show(q, freeMenu());
     if (data === 'm:balance') return show(q, balanceMenu(q.from.id));
+    if (data === 'm:profile') return show(q, profileMenu(q.from.id));
     if (data === 'm:topup') return show(q, topupMenu());
     if (data === 'm:ref') return show(q, referralMenu(q.from.id));
     if (data === 'm:reset') {
@@ -875,10 +935,11 @@ async function handleCallback(q) {
       if (!plan) return show(q, marketMenu());
       const price = PLAN_PRICE[plan.id];
       const u = user(q.from.id);
-      if (Number(u.balance || 0) + 1e-9 < price) {
+      const balance = Number(u.balance || 0);
+      if (balance + 1e-9 < price) {
         return show(q, {
           text: `Недостаточно средств.\n\nТариф: ${plan.days ? plan.days + ' дней' : 'навсегда'} — $${price}\n` +
-            `Ваш баланс: $${Number(u.balance || 0).toFixed(2)}\n\n` +
+            `Ваш баланс: $${balance.toFixed(2)}\n\n` +
             'Пополните баланс и вернитесь в «Маркет».',
           markup: {
             inline_keyboard: [
@@ -886,6 +947,31 @@ async function handleCallback(q) {
               backRow('m:market')
             ]
           }
+        });
+      }
+      return show(q, {
+        text: 'Подтвердите покупку\n\n' +
+          `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'}\n` +
+          `Цена: $${price}\n` +
+          `Баланс: $${balance.toFixed(2)}\n` +
+          `После покупки: $${(balance - price).toFixed(2)}`,
+        markup: {
+          inline_keyboard: [
+            [{ text: '✅ Подтвердить', callback_data: 'buy:' + plan.id }],
+            [{ text: '❌ Отмена', callback_data: 'm:market' }]
+          ]
+        }
+      });
+    }
+    if (data.startsWith('buy:')) {
+      const plan = PLANS.find((p) => p.id === data.slice(4));
+      if (!plan) return show(q, marketMenu());
+      const price = PLAN_PRICE[plan.id];
+      const u = user(q.from.id);
+      if (Number(u.balance || 0) + 1e-9 < price) {
+        return show(q, {
+          text: 'Недостаточно средств.',
+          markup: { inline_keyboard: [[{ text: '➕ Пополнить', callback_data: 'm:topup' }], backRow('m:market')] }
         });
       }
       u.balance = Math.round((u.balance - price) * 100) / 100;
@@ -898,7 +984,12 @@ async function handleCallback(q) {
           `Ваш ключ: ${key}\n` +
           `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'}\n` +
           'Введите его в «Настройки → Мод клиента».',
-        markup: { inline_keyboard: [backRow('m:market')] }
+        markup: {
+          inline_keyboard: [
+            [{ text: '👤 Профиль', callback_data: 'm:profile' }],
+            backRow('m:market')
+          ]
+        }
       });
     }
     if (!admin) return;
