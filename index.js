@@ -63,7 +63,8 @@ try {
 } catch (e) {
   console.error('avatar.png missing');
 }
-const PROMO_URL = 'https://tmod-admin.onrender.com/promo.png';
+const PROMO_VERSION = '2';
+const PROMO_URL = 'https://tmod-admin.onrender.com/promo.png?v=' + PROMO_VERSION;
 let PROMO_BYTES = null;
 try {
   PROMO_BYTES = fs.readFileSync(__dirname + '/promo.png');
@@ -792,23 +793,25 @@ function freeMenu() {
   };
 }
 
-/** Присылает картинку-рекламу с подписью и кнопками; file_id кэшируется. */
+/** Присылает картинку-рекламу с подписью и кнопками; file_id кэшируется по версии. */
 async function sendPromo(chatId) {
   const m = freeMenu();
+  const cached = state.promoVersion === PROMO_VERSION ? state.promoFileId : null;
   const send = (photo) => tg('sendPhoto', {
     chat_id: chatId,
     photo,
     caption: m.text,
     reply_markup: m.markup
   });
-  let r = await send(state.promoFileId || PROMO_URL);
-  if ((!r || !r.ok) && state.promoFileId) {
+  let r = await send(cached || PROMO_URL);
+  if ((!r || !r.ok) && cached) {
     r = await send(PROMO_URL);
   }
   if (r && r.ok) {
     const sizes = r.result && r.result.photo;
-    if (sizes && sizes.length) {
+    if (!cached && sizes && sizes.length) {
       state.promoFileId = sizes[sizes.length - 1].file_id;
+      state.promoVersion = PROMO_VERSION;
       save();
     }
     return r;
