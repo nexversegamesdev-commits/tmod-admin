@@ -491,6 +491,7 @@ async function handleActivation(body, ip, build) {
   if (!entry) return { ok: false, error: 'invalid' };
   if (isExpired(entry)) return { ok: false, error: 'banned' };
   if (entry.usedBy && norm(entry.usedBy) !== hwid) return { ok: false, error: 'used' };
+  const firstBind = !entry.usedBy;
   entry.usedBy = hwid;
   entry.usedAt = entry.usedAt || Date.now();
 
@@ -513,7 +514,7 @@ async function handleActivation(body, ip, build) {
     index = state.devices.length - 1;
   }
   save();
-  await replyToAdmin(deviceText(record), deviceButtons(index));
+  if (firstBind) await replyToAdmin(deviceText(record), deviceButtons(index));
   return { ok: true, ticket: ticketFor(key, hwid) };
 }
 
