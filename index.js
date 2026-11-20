@@ -41,6 +41,7 @@ const BUILD_ENFORCE = process.env.BUILD_ENFORCE === '1';
 const XROCKET_KEY = process.env.XROCKET_KEY ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcHBJZCI6IjMxMDM2MyIsImp0aSI6ImFwcDozMTAzNjM6YzkzYmQ5MDItYjFjYS00M2EzLTgwYjctZTRmYTY2NTczN2VmIiwiaWF0IjoxNzk1MTY1Njk3fQ.kJ4mBlhaFh1fuGYFfaIwSH8OANd2BJi7FYb5aI527Tk';
 const XROCKET_BASE = process.env.XROCKET_BASE || 'https://pay.xrocket.tg';
+const XROCKET_WEBHOOK_TOKEN = process.env.XROCKET_WEBHOOK_TOKEN || '';
 const REFERRAL_BONUS = 0.1;
 const PLAN_PRICE = { '7': 1, '30': 3, forever: 5 };
 const FREE_COOLDOWN_MS = 14 * 86400000;
@@ -840,7 +841,7 @@ async function handleCallback(q) {
     }
     if (data === 'm:help2') {
       return show(q, {
-        text: 'tmod — мод для TikTok: автопрогрев ленты, лайки, сохранения, '
+        text: 'GreiTikTok — мод для TikTok: автопрогрев ленты, лайки, сохранения, '
           + 'комментарии по теме и ИИ-чекер.\n\nКлючи и бесплатный доступ — в «Маркете».',
         markup: { inline_keyboard: [backRow('m:home')] }
       });
@@ -1395,6 +1396,16 @@ const server = http.createServer((req, res) => {
     });
     req.on('end', async () => {
       try {
+        if (XROCKET_WEBHOOK_TOKEN) {
+          const supplied = req.headers['rocket-pay-webhook-token']
+            || req.headers['x-rocket-pay-webhook-token']
+            || req.headers['x-webhook-token'] || '';
+          if (supplied && String(supplied) !== XROCKET_WEBHOOK_TOKEN) {
+            console.error('webhook token mismatch');
+            json(res, 403, { ok: false });
+            return;
+          }
+        }
         const data = JSON.parse(body || '{}');
         if (data.type === 'invoicePay' && data.data && data.data.status === 'paid') {
           const inv = state.invoices.find((i) => i.id === String(data.data.id));
