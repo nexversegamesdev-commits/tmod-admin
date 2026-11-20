@@ -40,7 +40,7 @@ const ALLOWED_BUILDS = String(process.env.ALLOWED_BUILDS || '')
 const BUILD_ENFORCE = process.env.BUILD_ENFORCE === '1';
 const XROCKET_KEY = process.env.XROCKET_KEY ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcHBJZCI6IjMxMDM2MyIsImp0aSI6ImFwcDozMTAzNjM6YzkzYmQ5MDItYjFjYS00M2EzLTgwYjctZTRmYTY2NTczN2VmIiwiaWF0IjoxNzk1MTY1Njk3fQ.kJ4mBlhaFh1fuGYFfaIwSH8OANd2BJi7FYb5aI527Tk';
-const XROCKET_BASE = process.env.XROCKET_BASE || 'https://pay.xrocket.tg/api';
+const XROCKET_BASE = process.env.XROCKET_BASE || 'https://pay.xrocket.tg';
 const REFERRAL_BONUS = 0.1;
 const PLAN_PRICE = { '7': 1, '30': 3, forever: 5 };
 const FREE_COOLDOWN_MS = 14 * 86400000;
@@ -535,10 +535,13 @@ function adminMenu() {
           { text: '🎟 Промокоды', callback_data: 'm:promos' }
         ],
         [
-          { text: '🎫 Тикеты', callback_data: 'm:tickets' },
-          { text: 'ℹ️ Помощь', callback_data: 'm:help' }
+          { text: '💰 Балансы', callback_data: 'm:balances' },
+          { text: '🎫 Тикеты', callback_data: 'm:tickets' }
         ],
-        [{ text: '◀️ Меню', callback_data: 'm:home' }]
+        [
+          { text: 'ℹ️ Помощь', callback_data: 'm:help' },
+          { text: '◀️ Меню', callback_data: 'm:home' }
+        ]
       ]
     }
   };
@@ -597,6 +600,25 @@ function ticketsMenu() {
     text: state.tickets.some((t) => t.status !== 'closed')
       ? 'Открытые тикеты:'
       : 'Открытых тикетов нет.',
+    markup: { inline_keyboard: rows }
+  };
+}
+
+function balancesMenu() {
+  const rows = [];
+  Object.keys(state.users).slice(-10).forEach((id) => {
+    const u = state.users[id];
+    rows.push([
+      { text: `👤 ${id} · $${Number(u.balance || 0).toFixed(2)}`, callback_data: 'nop' },
+      { text: '➕$1', callback_data: 'bal:' + id + ':1' },
+      { text: '➕$5', callback_data: 'bal:' + id + ':5' }
+    ]);
+  });
+  rows.push(backRow('m:admin'));
+  return {
+    text: Object.keys(state.users).length
+      ? 'Балансы пользователей (➕ — начислить вручную):'
+      : 'Пользователей пока нет.',
     markup: { inline_keyboard: rows }
   };
 }
@@ -894,6 +916,32 @@ async function handleCallback(q) {
     if (data === 'm:orders') return show(q, ordersMenu());
     if (data === 'm:promos') return show(q, promosMenu());
     if (data === 'm:tickets') return show(q, ticketsMenu());
+    if (data === 'm:balances') return show(q, balancesMenu());
+    if (data === 'nop') {
+      await tg('answerCallbackQuery', { callback_query_id: q.id, text: '' });
+      return;
+    }
+    if (data.startsWith('bal:')) {
+      const parts = data.split(':');
+      const target = String(parts[1]);
+      const amount = Number(parts[2]);
+      if (!state.users[target] || !amount) {
+        await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Не найдено' });
+        return show(q, balancesMenu());
+      }
+      const u = state.users[target];
+      u.balance = Math.round((Number(u.balance || 0) + amount) * 100) / 100;
+      save();
+      await tg('sendMessage', {
+        chat_id: target,
+        text: `💰 Баланс пополнен на $${amount.toFixed(2)}.\nТекущий баланс: $${u.balance.toFixed(2)}`
+      });
+      await tg('answerCallbackQuery', {
+        callback_query_id: q.id,
+        text: 'Начислено $' + amount.toFixed(2)
+      });
+      return show(q, balancesMenu());
+    }
     if (data.startsWith('sup:')) {
       const parts = data.split(':');
       const ticket = state.tickets.find((t) => t.id === parts[1]);
