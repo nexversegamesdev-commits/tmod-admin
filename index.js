@@ -234,7 +234,10 @@ async function xrCreateInvoice(amount, chatId) {
         description: 'GreiTikTok balance top-up',
         clientInvoiceId,
         expiresIn: 3600000,
-        callback: { payload: { chatId: String(chatId), kind: 'topup' } },
+        callback: {
+          callbackUrl: 'https://tmod-admin.onrender.com/xrocket/webhook',
+          payload: { chatId: String(chatId), kind: 'topup' }
+        },
         data: { chatId: String(chatId), kind: 'topup' }
       })
     });
