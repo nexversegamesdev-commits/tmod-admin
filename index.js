@@ -249,15 +249,21 @@ async function geoLookup(ip) {
 }
 
 function deviceButtons(index) {
-  return {
-    inline_keyboard: [
-      [
-        { text: '🚫 Бан HWID', callback_data: 'bh:' + index },
-        { text: '🚫 Бан ключ', callback_data: 'bk:' + index }
-      ],
-      [{ text: '◀️ К устройствам', callback_data: 'm:devs' }]
+  const device = state.devices[index];
+  const rows = [
+    [
+      { text: '🚫 Бан HWID', callback_data: 'bh:' + index },
+      { text: '🚫 Бан ключ', callback_data: 'bk:' + index }
     ]
-  };
+  ];
+  if (device && device.key) {
+    rows.push([
+      { text: '♻️ Сброс HWID', callback_data: 'fk:' + device.key },
+      { text: '🔓 Сброс (force)', callback_data: 'frc:' + device.key }
+    ]);
+  }
+  rows.push([{ text: '◀️ К устройствам', callback_data: 'm:devs' }]);
+  return { inline_keyboard: rows };
 }
 
 async function handleActivation(body, ip, build) {
@@ -377,11 +383,31 @@ function adminMenu() {
           { text: '👤 Админы', callback_data: 'm:admins' }
         ],
         [
-          { text: 'ℹ️ Помощь', callback_data: 'm:help' },
-          { text: '◀️ Меню', callback_data: 'm:home' }
-        ]
+          { text: '🛒 Заявки', callback_data: 'm:orders' },
+          { text: 'ℹ️ Помощь', callback_data: 'm:help' }
+        ],
+        [{ text: '◀️ Меню', callback_data: 'm:home' }]
       ]
     }
+  };
+}
+
+function ordersMenu() {
+  const rows = [];
+  const fresh = state.orders.filter((o) => o.status === 'new').slice(-10);
+  fresh.forEach((o) => {
+    rows.push([
+      { text: `✅ ${o.id} · ${o.days ? o.days + 'д' : '∞'} · ${o.price}`, callback_data: 'ord:' + o.id + ':ok' },
+      { text: '❌ ' + o.id, callback_data: 'ord:' + o.id + ':no' }
+    ]);
+  });
+  rows.push(backRow('m:admin'));
+  const issued = state.orders.filter((o) => o.status === 'issued').length;
+  return {
+    text: fresh.length
+      ? 'Новые заявки: ✅ выдать ключ, ❌ отменить.'
+      : `Новых заявок нет. Выдано всего: ${issued}.`,
+    markup: { inline_keyboard: rows }
   };
 }
 
@@ -554,6 +580,7 @@ async function handleCallback(q) {
     if (data === 'm:devs') return show(q, devicesMenu());
     if (data === 'm:bans') return show(q, bansMenu());
     if (data === 'm:admins') return show(q, adminsMenu());
+    if (data === 'm:orders') return show(q, ordersMenu());
     if (data.startsWith('am:') || data.startsWith('rj:')) {
       const approve = data.startsWith('am:');
       const id = String(data.slice(3)).trim();
@@ -626,14 +653,28 @@ async function handleCallback(q) {
         const row = [{ text: `🗑 ${k.key} · ${status}`, callback_data: 'del:' + k.key }];
         if (k.usedBy) {
           row.push({ text: '♻️ ' + k.key, callback_data: 'fk:' + k.key });
+          row.push({ text: '🔓 ' + k.key, callback_data: 'frc:' + k.key });
         }
         rows.push(row);
       });
       rows.push(backRow('m:keys'));
       return show(q, {
-        text: 'Все ключи: 🗑 — удалить, ♻️ — сбросить привязку HWID (лимит сбросов).',
+        text: 'Все ключи: 🗑 — удалить, ♻️ — сброс HWID (лимит), 🔓 — сброс без лимита.',
         markup: { inline_keyboard: rows }
       });
+    }
+    if (data.startsWith('frc:')) {
+      const key = norm(data.slice(4));
+      const entry = findKey(key);
+      if (!entry) {
+        await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Ключ не найден' });
+        return show(q, keysMenu());
+      }
+      entry.usedBy = null;
+      entry.usedAt = 0;
+      save();
+      await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Сброшено' });
+      return show(q, keysMenu());
     }
     if (data.startsWith('fk:')) {
       const key = norm(data.slice(3));
@@ -647,7 +688,7 @@ async function handleCallback(q) {
       if (used >= max) {
         await tg('answerCallbackQuery', {
           callback_query_id: q.id,
-          text: 'Лимит сбросов исчерпан (команда /forcefree ' + key + ')'
+          text: 'Лимит сбросов исчерпан — нажми 🔓 рядом с ключом'
         });
         return;
       }
