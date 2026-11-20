@@ -987,7 +987,7 @@ async function handleCallback(q) {
       const invoice = await xrCreateInvoice(amount, q.from.id);
       if (!invoice) {
         return show(q, {
-          text: 'Оплата временно недоступна. Попробуйте позже или напишите @Ftor0_0.',
+          text: 'Оплата временно недоступна. Попробуйте позже или напишите в поддержку.',
           markup: { inline_keyboard: [backRow('m:topup')] }
         });
       }
