@@ -52,7 +52,7 @@ function freshKeys() {
 
 let state = {
   devices: [], keys: freshKeys(), bannedKeys: [], bannedHwids: [],
-  admins: [], pending: [], orders: [], promos: []
+  admins: [], pending: [], orders: [], promos: [], tickets: []
 };
 const waiting = new Map();
 try {
@@ -66,6 +66,7 @@ if (!Array.isArray(state.admins)) state.admins = [];
 if (!Array.isArray(state.pending)) state.pending = [];
 if (!Array.isArray(state.orders)) state.orders = [];
 if (!Array.isArray(state.promos)) state.promos = [];
+if (!Array.isArray(state.tickets)) state.tickets = [];
 for (const id of ENV_ADMINS) {
   if (!state.admins.includes(id)) state.admins.push(id);
 }
@@ -332,8 +333,9 @@ function mainMenuFor(id) {
   const rows = [
     [
       { text: '🛒 Маркет', callback_data: 'm:market' },
-      { text: 'ℹ️ Помощь', callback_data: 'm:help2' }
-    ]
+      { text: '🆘 Поддержка', callback_data: 'm:support' }
+    ],
+    [{ text: 'ℹ️ Помощь', callback_data: 'm:help2' }]
   ];
   if (isAdmin(id)) {
     rows.push([{ text: '⚙️ Админ', callback_data: 'm:admin' }]);
@@ -403,9 +405,10 @@ function adminMenu() {
           { text: '🎟 Промокоды', callback_data: 'm:promos' }
         ],
         [
-          { text: 'ℹ️ Помощь', callback_data: 'm:help' },
-          { text: '◀️ Меню', callback_data: 'm:home' }
-        ]
+          { text: '🎫 Тикеты', callback_data: 'm:tickets' },
+          { text: 'ℹ️ Помощь', callback_data: 'm:help' }
+        ],
+        [{ text: '◀️ Меню', callback_data: 'm:home' }]
       ]
     }
   };
@@ -447,6 +450,23 @@ function promosMenu() {
   rows.push(backRow('m:admin'));
   return {
     text: state.promos.length ? 'Промокоды (тап — удалить):' : 'Промокодов нет.',
+    markup: { inline_keyboard: rows }
+  };
+}
+
+function ticketsMenu() {
+  const rows = [];
+  state.tickets.filter((t) => t.status !== 'closed').slice(-10).forEach((t) => {
+    rows.push([
+      { text: `✍️ #${t.id} ${t.username ? '@' + t.username : ''}`, callback_data: 'sup:' + t.id + ':reply' },
+      { text: '✅ ' + t.id, callback_data: 'sup:' + t.id + ':close' }
+    ]);
+  });
+  rows.push(backRow('m:admin'));
+  return {
+    text: state.tickets.some((t) => t.status !== 'closed')
+      ? 'Открытые тикеты:'
+      : 'Открытых тикетов нет.',
     markup: { inline_keyboard: rows }
   };
 }
@@ -578,6 +598,13 @@ async function handleCallback(q) {
         markup: { inline_keyboard: [backRow('m:market')] }
       });
     }
+    if (data === 'm:support') {
+      waiting.set(String(q.from.id), { action: 'support' });
+      return show(q, {
+        text: '🆘 Поддержка\n\nОпишите проблему одним сообщением: установка, ключ, ИИ, бан — ответим в этот чат.',
+        markup: { inline_keyboard: [backRow('m:home')] }
+      });
+    }
     if (data === 'm:help2') {
       return show(q, {
         text: 'tmod — мод для TikTok: автопрогрев ленты, лайки, сохранения, '
@@ -660,6 +687,27 @@ async function handleCallback(q) {
     if (data === 'm:admins') return show(q, adminsMenu());
     if (data === 'm:orders') return show(q, ordersMenu());
     if (data === 'm:promos') return show(q, promosMenu());
+    if (data === 'm:tickets') return show(q, ticketsMenu());
+    if (data.startsWith('sup:')) {
+      const parts = data.split(':');
+      const ticket = state.tickets.find((t) => t.id === parts[1]);
+      if (!ticket) {
+        await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Тикет не найден' });
+        return;
+      }
+      if (parts[2] === 'reply') {
+        waiting.set(String(q.from.id), { action: 'reply', ticketId: ticket.id });
+        await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Напишите ответ сообщением' });
+        return show(q, {
+          text: `Тикет #${ticket.id}\n${ticket.text}\n\nОтправьте ответ одним сообщением.`,
+          markup: { inline_keyboard: [backRow('m:tickets')] }
+        });
+      }
+      ticket.status = 'closed';
+      save();
+      await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Тикет закрыт' });
+      return show(q, ticketsMenu());
+    }
     if (data.startsWith('promo:new:')) {
       const days = parseInt(data.slice(10), 10) || 0;
       const code = newPromo(days);
@@ -881,6 +929,45 @@ async function handleMessage(msg) {
         `Тариф: ${promo.days ? promo.days + ' дней' : 'навсегда'}\n` +
         'Введите его в «Настройки → Мод клиента».'
     });
+  }
+  if (pendingInput && pendingInput.action === 'support' && text && !text.startsWith('/')) {
+    waiting.delete(String(chatId));
+    const user = msg.chat;
+    const ticket = {
+      id: crypto.randomBytes(3).toString('hex'),
+      chatId,
+      username: user.username || '',
+      name: [user.first_name, user.last_name].filter(Boolean).join(' '),
+      text: text.slice(0, 500),
+      status: 'open',
+      ts: Date.now()
+    };
+    state.tickets.push(ticket);
+    save();
+    await replyToAdmin(
+      `🆘 Тикет #${ticket.id}\n` +
+      (ticket.username ? '@' + ticket.username : ticket.name) + ` (${chatId})\n\n` + ticket.text,
+      {
+        inline_keyboard: [[
+          { text: '✍️ Ответить', callback_data: 'sup:' + ticket.id + ':reply' },
+          { text: '✅ Закрыть', callback_data: 'sup:' + ticket.id + ':close' }
+        ]]
+      });
+    return tg('sendMessage', {
+      chat_id: chatId,
+      text: `Тикет #${ticket.id} отправлен. Ответ придёт в этот чат.`
+    });
+  }
+  if (pendingInput && pendingInput.action === 'reply' && text && !text.startsWith('/') && isAdmin(chatId)) {
+    waiting.delete(String(chatId));
+    const ticket = state.tickets.find((t) => t.id === pendingInput.ticketId);
+    if (!ticket) {
+      return tg('sendMessage', { chat_id: chatId, text: 'Тикет не найден.' });
+    }
+    ticket.status = 'answered';
+    save();
+    await tg('sendMessage', { chat_id: ticket.chatId, text: '🆘 Ответ поддержки:\n' + text });
+    return tg('sendMessage', { chat_id: chatId, text: 'Ответ отправлен пользователю.' });
   }
   if (!isAdmin(chatId)) return;
   if (text === '/devices') {
