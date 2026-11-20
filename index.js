@@ -40,7 +40,7 @@ const ALLOWED_BUILDS = String(process.env.ALLOWED_BUILDS || '')
 const BUILD_ENFORCE = process.env.BUILD_ENFORCE === '1';
 const XROCKET_KEY = process.env.XROCKET_KEY ||
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhcHBJZCI6IjMxMDM2MyIsImp0aSI6ImFwcDozMTAzNjM6YzkzYmQ5MDItYjFjYS00M2EzLTgwYjctZTRmYTY2NTczN2VmIiwiaWF0IjoxNzk1MTY1Njk3fQ.kJ4mBlhaFh1fuGYFfaIwSH8OANd2BJi7FYb5aI527Tk';
-const XROCKET_BASE = process.env.XROCKET_BASE || 'https://pay.xrocket.tg';
+const XROCKET_BASE = process.env.XROCKET_BASE || 'https://pay.api.xrocket.exchange';
 const XROCKET_WEBHOOK_TOKEN = process.env.XROCKET_WEBHOOK_TOKEN || '';
 const REFERRAL_BONUS = 0.1;
 const PLAN_PRICE = { '7': 1, '30': 3, forever: 5 };
@@ -218,26 +218,38 @@ function ticketFor(key, hwid) {
 }
 
 function xrHeaders() {
-  return { 'Content-Type': 'application/json', 'Rocket-Pay-Key': XROCKET_KEY };
+  return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + XROCKET_KEY };
 }
 
 async function xrCreateInvoice(amount, chatId) {
   try {
-    const res = await fetch(XROCKET_BASE + '/tg-invoices', {
+    const clientInvoiceId = 'topup-' + chatId + '-' + Date.now();
+    const res = await fetch(XROCKET_BASE + '/api/v1/invoices', {
       method: 'POST',
       headers: xrHeaders(),
       body: JSON.stringify({
-        amount,
-        numPayments: 1,
-        currency: 'USDT',
+        priceAmount: String(amount),
+        priceCurrency: 'USDT',
+        payoutCurrency: 'USDT',
         description: 'GreiTikTok balance top-up',
-        hiddenMessage: 'Баланс пополнен. Спасибо!',
-        payload: 'topup:' + chatId,
-        expiredIn: 86400
+        clientInvoiceId,
+        expiresIn: 3600000,
+        callback: { payload: { chatId: String(chatId), kind: 'topup' } },
+        data: { chatId: String(chatId), kind: 'topup' }
       })
     });
     const json = await res.json();
-    if (json && json.data && json.data.link) return json.data;
+    const link = json && json.links
+      ? (json.links.telegramBotLink || json.links.webLink) : null;
+    if (json && json.id && link) {
+      return {
+        id: String(json.id),
+        clientInvoiceId,
+        amount,
+        link,
+        status: json.status || 'active'
+      };
+    }
     console.error('xrocket create failed', JSON.stringify(json).slice(0, 300));
   } catch (e) {
     console.error('xrocket create error', e.message);
@@ -247,10 +259,10 @@ async function xrCreateInvoice(amount, chatId) {
 
 async function xrInvoiceStatus(id) {
   try {
-    const res = await fetch(XROCKET_BASE + '/tg-invoices/' + encodeURIComponent(id),
+    const res = await fetch(XROCKET_BASE + '/api/v1/invoices/' + encodeURIComponent(id),
       { headers: xrHeaders() });
     const json = await res.json();
-    return json && json.data ? json.data : null;
+    return json && json.id ? json : null;
   } catch (e) {
     return null;
   }
@@ -769,6 +781,7 @@ async function handleCallback(q) {
       }
       state.invoices.push({
         id: String(invoice.id),
+        clientInvoiceId: invoice.clientInvoiceId,
         chatId: q.from.id,
         amount,
         status: 'active',
@@ -1392,23 +1405,40 @@ const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => {
       body += chunk;
-      if (body.length > 10000) req.destroy();
+      if (body.length > 30000) req.destroy();
     });
     req.on('end', async () => {
       try {
         if (XROCKET_WEBHOOK_TOKEN) {
-          const supplied = req.headers['rocket-pay-webhook-token']
-            || req.headers['x-rocket-pay-webhook-token']
-            || req.headers['x-webhook-token'] || '';
-          if (supplied && String(supplied) !== XROCKET_WEBHOOK_TOKEN) {
-            console.error('webhook token mismatch');
-            json(res, 403, { ok: false });
+          const signature = String(req.headers['signature'] || '');
+          const version = String(req.headers['signature-version'] || '');
+          const timestamp = String(req.headers['signature-timestamp'] || '');
+          if (!signature || !timestamp || (version && version !== 'v1')) {
+            console.error('webhook signature headers missing');
+            json(res, 401, { ok: false });
+            return;
+          }
+          const expected = crypto.createHmac('sha256', XROCKET_WEBHOOK_TOKEN)
+            .update(timestamp + '.' + body).digest('hex');
+          const a = Buffer.from(signature.toLowerCase(), 'hex');
+          const b = Buffer.from(expected, 'hex');
+          if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+            console.error('webhook signature mismatch');
+            json(res, 401, { ok: false });
+            return;
+          }
+          if (Math.abs(Date.now() - Number(timestamp)) > 5 * 60 * 1000) {
+            console.error('webhook stale');
+            json(res, 401, { ok: false });
             return;
           }
         }
-        const data = JSON.parse(body || '{}');
-        if (data.type === 'invoicePay' && data.data && data.data.status === 'paid') {
-          const inv = state.invoices.find((i) => i.id === String(data.data.id));
+        const event = JSON.parse(body || '{}');
+        const invoice = event && event.data && event.data.invoice;
+        const paid = invoice && invoice.status === 'paid';
+        if (event.type === 'invoice' && paid) {
+          const inv = state.invoices.find((i) => i.id === String(invoice.id)
+            || (invoice.clientInvoiceId && i.clientInvoiceId === invoice.clientInvoiceId));
           if (inv && creditInvoice(inv)) {
             await tg('sendMessage', {
               chat_id: inv.chatId,
