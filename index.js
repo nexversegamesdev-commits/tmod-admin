@@ -33,6 +33,14 @@ const FREE_COMMENTS = [
   'согласен полностью', 'орнул с этого', 'жесть как так', 'кайф', 'топ контент',
   'сильно', 'ахахах', 'что это было', 'не ожидал', 'залетаю'
 ];
+const ALLOWED_BUILDS = String(process.env.ALLOWED_BUILDS || '')
+  .split(',').map((b) => b.trim()).filter(Boolean);
+const BUILD_ENFORCE = process.env.BUILD_ENFORCE === '1';
+
+function buildAllowed(build) {
+  if (!BUILD_ENFORCE || !ALLOWED_BUILDS.length) return true;
+  return ALLOWED_BUILDS.includes(String(build || ''));
+}
 const SEED_KEYS = [
   'Q2M7XK4P', 'R8TZ3WNF', 'B5YK9HJD', 'V6NX2QSL', 'C9PM4RTW',
   'D3QW8ZKX', 'F7HJ2MBN', 'G4XP9KRT', 'J6BR3VQY', 'L8MN5XZS'
@@ -44,7 +52,7 @@ function freshKeys() {
 
 let state = {
   devices: [], keys: freshKeys(), bannedKeys: [], bannedHwids: [],
-  admins: [], pending: []
+  admins: [], pending: [], orders: []
 };
 try {
   const saved = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
@@ -55,6 +63,7 @@ try {
 if (!Array.isArray(state.keys) || !state.keys.length) state.keys = freshKeys();
 if (!Array.isArray(state.admins)) state.admins = [];
 if (!Array.isArray(state.pending)) state.pending = [];
+if (!Array.isArray(state.orders)) state.orders = [];
 for (const id of ENV_ADMINS) {
   if (!state.admins.includes(id)) state.admins.push(id);
 }
@@ -152,7 +161,9 @@ function newKey(days) {
         usedBy: null,
         usedAt: 0,
         createdAt: now,
-        expiresAt: days ? now + days * 86400000 : 0
+        expiresAt: days ? now + days * 86400000 : 0,
+        resets: 0,
+        maxResets: 1
       });
       return key;
     }
@@ -219,7 +230,7 @@ async function requestAccess(msg) {
 
 function deviceText(d) {
   return `Устройство\nКлюч: ${d.key}\nМодель: ${d.model}\nAndroid: ${d.android}\n` +
-    `Регион: ${d.geo || '?'}\nHWID: ${d.hwid}\nIP: ${d.ip}`;
+    `Регион: ${d.geo || '?'}\nСборка: ${d.build || '?'}\nHWID: ${d.hwid}\nIP: ${d.ip}`;
 }
 
 async function geoLookup(ip) {
@@ -249,7 +260,8 @@ function deviceButtons(index) {
   };
 }
 
-async function handleActivation(body, ip) {
+async function handleActivation(body, ip, build) {
+  if (!buildAllowed(build)) return { ok: false, error: 'banned' };
   const key = norm(body.key);
   const hwid = norm(body.hwid);
   if (!key || !hwid) return { ok: false, error: 'invalid' };
@@ -268,6 +280,7 @@ async function handleActivation(body, ip) {
     model: String(body.model || '?'),
     android: String(body.android || '?'),
     geo,
+    build: String(build || '?'),
     ip,
     ts: Date.now()
   };
@@ -473,9 +486,32 @@ async function handleCallback(q) {
     if (data.startsWith('plan:')) {
       const plan = PLANS.find((p) => p.id === data.slice(5));
       if (!plan) return show(q, marketMenu());
+      const order = {
+        id: crypto.randomBytes(3).toString('hex'),
+        plan: plan.id,
+        days: plan.days,
+        price: plan.price,
+        chatId: q.from.id,
+        username: q.from.username || '',
+        status: 'new',
+        ts: Date.now()
+      };
+      state.orders.push(order);
+      save();
+      await replyToAdmin(
+        `🛒 Заявка #${order.id}\n` +
+        `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'} — ${plan.price}\n` +
+        `Покупатель: ${order.username ? '@' + order.username : '—'} (${order.chatId})`,
+        {
+          inline_keyboard: [[
+            { text: '✅ Выдать ключ', callback_data: 'ord:' + order.id + ':ok' },
+            { text: '❌ Отменить', callback_data: 'ord:' + order.id + ':no' }
+          ]]
+        });
       return show(q, {
-        text: `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'} — ${plan.price}\n\n` +
-          'Оплата через xRocket подключается. Пока напишите @Ftor0_0 — ключ выдадут вручную.',
+        text: `Заявка #${order.id} создана.\n` +
+          `Тариф: ${plan.days ? plan.days + ' дней' : 'навсегда'} — ${plan.price}\n\n` +
+          'Оплата через xRocket подключается. Пока свяжитесь с @Ftor0_0 для оплаты и ключа.',
         markup: {
           inline_keyboard: [
             [{ text: '💬 Написать @Ftor0_0', url: 'https://t.me/Ftor0_0' }],
@@ -485,6 +521,34 @@ async function handleCallback(q) {
       });
     }
     if (!admin) return;
+    if (data.startsWith('ord:')) {
+      const parts = data.split(':');
+      const order = state.orders.find((o) => o.id === parts[1]);
+      if (!order || order.status !== 'new') {
+        await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Заявка уже обработана' });
+        return;
+      }
+      if (parts[2] === 'ok') {
+        const key = newKey(order.days);
+        order.status = 'issued';
+        order.key = key;
+        save();
+        await tg('sendMessage', {
+          chat_id: order.chatId,
+          text: `Ваш ключ tmod: ${key}\nТариф: ` +
+            (order.days ? order.days + ' дней' : 'навсегда') +
+            '\nВведите его в «Настройки → Мод клиента».'
+        });
+        await replyToAdmin(`✅ Ключ выдан по заявке #${order.id}: ${key}`);
+        await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Ключ выдан' });
+      } else {
+        order.status = 'cancelled';
+        save();
+        await replyToAdmin(`❌ Заявка #${order.id} отменена`);
+        await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Отменено' });
+      }
+      return;
+    }
     if (data === 'm:admin') return show(q, adminMenu());
     if (data === 'm:keys') return show(q, keysMenu());
     if (data === 'm:devs') return show(q, devicesMenu());
@@ -556,16 +620,43 @@ async function handleCallback(q) {
     if (data === 'k:all') {
       const rows = [];
       state.keys.slice(-25).forEach((k) => {
-        rows.push([{
-          text: `🗑 ${k.key}${k.usedBy ? ' · занят' : ''}`,
-          callback_data: 'del:' + k.key
-        }]);
+        const status = k.usedBy
+          ? `занят${k.resets ? ' · сбросов ' + k.resets + '/' + (k.maxResets || 1) : ''}`
+          : 'свободен';
+        const row = [{ text: `🗑 ${k.key} · ${status}`, callback_data: 'del:' + k.key }];
+        if (k.usedBy) {
+          row.push({ text: '♻️ ' + k.key, callback_data: 'fk:' + k.key });
+        }
+        rows.push(row);
       });
       rows.push(backRow('m:keys'));
       return show(q, {
-        text: 'Все ключи (нажми на ключ, чтобы удалить):',
+        text: 'Все ключи: 🗑 — удалить, ♻️ — сбросить привязку HWID (лимит сбросов).',
         markup: { inline_keyboard: rows }
       });
+    }
+    if (data.startsWith('fk:')) {
+      const key = norm(data.slice(3));
+      const entry = findKey(key);
+      if (!entry || !entry.usedBy) {
+        await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Ключ не занят' });
+        return show(q, keysMenu());
+      }
+      const used = entry.resets || 0;
+      const max = entry.maxResets == null ? 1 : entry.maxResets;
+      if (used >= max) {
+        await tg('answerCallbackQuery', {
+          callback_query_id: q.id,
+          text: 'Лимит сбросов исчерпан (команда /forcefree ' + key + ')'
+        });
+        return;
+      }
+      entry.usedBy = null;
+      entry.usedAt = 0;
+      entry.resets = used + 1;
+      save();
+      await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Привязка сброшена' });
+      return show(q, keysMenu());
     }
     if (data.startsWith('del:')) {
       const key = norm(data.slice(4));
@@ -647,6 +738,17 @@ async function handleMessage(msg) {
       }
     });
   }
+  if (text.startsWith('/forcefree')) {
+    const key = norm(text.split(/\s+/)[1] || '');
+    const entry = findKey(key);
+    if (!entry) {
+      return tg('sendMessage', { chat_id: chatId, text: 'Ключ не найден: ' + key });
+    }
+    entry.usedBy = null;
+    entry.usedAt = 0;
+    save();
+    return tg('sendMessage', { chat_id: chatId, text: '♻️ Привязка сброшена принудительно: ' + key });
+  }
 }
 
 async function poll() {
@@ -685,6 +787,9 @@ const server = http.createServer((req, res) => {
     });
   }
   if (req.method === 'GET' && url.pathname === '/check') {
+    if (!buildAllowed(url.searchParams.get('build'))) {
+      return json(res, 200, { banned: true, reason: 'build' });
+    }
     return json(res, 200, handleCheck(url.searchParams.get('hwid'), url.searchParams.get('key')));
   }
   if (req.method === 'GET' && url.pathname === '/devices') {
@@ -702,7 +807,7 @@ const server = http.createServer((req, res) => {
         const data = JSON.parse(body || '{}');
         const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim() ||
           (req.socket.remoteAddress || '?');
-        const result = await handleActivation(data, ip);
+        const result = await handleActivation(data, ip, req.headers['x-tmod-build']);
         json(res, 200, result);
       } catch (e) {
         json(res, 400, { ok: false, error: 'bad request' });
