@@ -49,8 +49,7 @@ function planWord(days) {
 const FREE_COOLDOWN_MS = 14 * 86400000;
 const RESET_PRICE = 0.5;
 let BOT_USERNAME = '';
-const APK_URL = process.env.APK_URL ||
-  'https://github.com/nexversegamesdev-commits/tmod-admin/releases/download/apk-47.7.3/GreiTikTok-47.7.3-universal.apk';
+const APK_URL = process.env.APK_URL || 'https://t.me/+kdzKWVZcvUljZmE6';
 const SUB_CHANNEL = process.env.SUB_CHANNEL || '-1003492504126';
 const SUB_LINK = 'https://t.me/GreiTikTok';
 const SUB_GATE = process.env.SUB_GATE !== '0';
@@ -633,7 +632,7 @@ function mainMenuFor(id) {
       { text: '👥 Реферальная система', callback_data: 'm:ref' },
       { text: '🆘 Поддержка', callback_data: 'm:support' }
     ],
-    [{ text: '📥 Скачать APK', callback_data: 'apk:send' }],
+    [{ text: '📥 Скачать APK', url: APK_URL }],
     [{ text: 'ℹ️ Помощь', callback_data: 'm:help2' }]
   ];
   if (isAdmin(id)) {
