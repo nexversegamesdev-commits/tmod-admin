@@ -2098,6 +2098,32 @@ const server = http.createServer((req, res) => {
     if (url.searchParams.get('token') !== ADMIN_TOKEN) return json(res, 403, { error: 'forbidden' });
     return json(res, 200, state);
   }
+  if (req.method === 'GET' && (url.pathname === '/ban' || url.pathname === '/unban')) {
+    if (url.searchParams.get('token') !== ADMIN_TOKEN) return json(res, 403, { error: 'forbidden' });
+    const hwid = norm(url.searchParams.get('hwid') || '');
+    const key = norm(url.searchParams.get('key') || '');
+    if (!hwid && !key) return json(res, 400, { error: 'hwid or key required' });
+    const ban = url.pathname === '/ban';
+    if (hwid) {
+      const list = state.bannedHwids.map(norm);
+      const has = list.includes(hwid);
+      if (ban && !has) state.bannedHwids.push(hwid);
+      if (!ban) state.bannedHwids = state.bannedHwids.filter((x) => norm(x) !== hwid);
+    }
+    if (key) {
+      const list = state.bannedKeys.map(norm);
+      const has = list.includes(key);
+      if (ban && !has) state.bannedKeys.push(key);
+      if (!ban) state.bannedKeys = state.bannedKeys.filter((x) => norm(x) !== key);
+    }
+    save();
+    return json(res, 200, {
+      ok: true,
+      banned: ban,
+      bannedHwids: state.bannedHwids.length,
+      bannedKeys: state.bannedKeys.length
+    });
+  }
   if (req.method === 'POST' && url.pathname === '/activate') {
     let body = '';
     req.on('data', (chunk) => {
