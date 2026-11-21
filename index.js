@@ -37,6 +37,9 @@ const XROCKET_KEY = process.env.XROCKET_KEY ||
 const XROCKET_BASE = process.env.XROCKET_BASE || 'https://pay.api.xrocket.exchange';
 const XROCKET_WEBHOOK_TOKEN = process.env.XROCKET_WEBHOOK_TOKEN || '';
 const REFERRAL_BONUS = 0.1;
+const REF_L1_PERCENT = 0.10;
+const REF_L2_PERCENT = 0.05;
+const DAILY_BONUS = 0.02;
 const PLAN_PRICE = { '3': 1, '7': 2, '30': 7, forever: 20 };
 
 function planWord(days) {
@@ -106,13 +109,15 @@ if (!Array.isArray(state.promos)) state.promos = [];
 if (!Array.isArray(state.tickets)) state.tickets = [];
 if (!state.users || typeof state.users !== 'object') state.users = {};
 if (!Array.isArray(state.invoices)) state.invoices = [];
+if (!Array.isArray(state.purchases)) state.purchases = [];
 
 function user(chatId) {
   const id = String(chatId);
   if (!state.users[id]) {
     state.users[id] = {
       balance: 0, referredBy: null, freeAt: 0,
-      resetCredits: 0, lowNotifiedAt: 0
+      resetCredits: 0, lowNotifiedAt: 0,
+      createdAt: Date.now(), lastBonusDay: ''
     };
   }
   const u = state.users[id];
@@ -515,6 +520,83 @@ function moscowTime(ts) {
   }
 }
 
+function moscowDay() {
+  try {
+    return new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Moscow' });
+  } catch (e) {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+/** Проценты с покупки: 10% пригласившему и 5% его пригласившему. */
+async function awardPurchase(buyerId, price) {
+  const buyer = state.users[String(buyerId)];
+  const l1 = buyer && buyer.referredBy ? String(buyer.referredBy) : null;
+  if (!l1 || !state.users[l1]) return;
+  const b1 = Math.round(price * REF_L1_PERCENT * 100) / 100;
+  if (b1 > 0) {
+    const r1 = state.users[l1];
+    r1.balance = Math.round((Number(r1.balance || 0) + b1) * 100) / 100;
+    await tg('sendMessage', {
+      chat_id: l1,
+      text: `💸 +$${b1.toFixed(2)} — 10% с покупки вашего реферала.`
+    });
+  }
+  const l2 = state.users[l1].referredBy ? String(state.users[l1].referredBy) : null;
+  if (l2 && l2 !== String(buyerId) && state.users[l2]) {
+    const b2 = Math.round(price * REF_L2_PERCENT * 100) / 100;
+    if (b2 > 0) {
+      const r2 = state.users[l2];
+      r2.balance = Math.round((Number(r2.balance || 0) + b2) * 100) / 100;
+      await tg('sendMessage', {
+        chat_id: l2,
+        text: `💸 +$${b2.toFixed(2)} — 5% с покупки реферала вашего реферала.`
+      });
+    }
+  }
+  save();
+}
+
+function statsMenu() {
+  const now = Date.now();
+  const day = now - 86400000;
+  const week = now - 7 * 86400000;
+  const devices = state.devices || [];
+  const active24 = devices.filter((d) => (d.ts || 0) >= day).length;
+  const keys = state.keys || [];
+  const activeKeys = keys.filter((k) => !k.expiresAt || k.expiresAt > now).length;
+  const freeKeys = keys.filter((k) => !k.usedBy).length;
+  const users = Object.values(state.users || {});
+  const newUsers = users.filter((u) => (u.createdAt || 0) >= day).length;
+  const invoices = (state.invoices || []).filter((i) => i.status === 'paid');
+  const sum = (list) => list.reduce((acc, i) => acc + Number(i.amount || 0), 0);
+  const incomeTotal = sum(invoices);
+  const income24 = sum(invoices.filter((i) => (i.createdAt || 0) >= day));
+  const income7 = sum(invoices.filter((i) => (i.createdAt || 0) >= week));
+  const purchases = state.purchases || [];
+  const purchases24 = purchases.filter((p) => (p.ts || 0) >= day).length;
+  const buyers = new Set(purchases.map((p) => String(p.chatId)));
+  const conv = users.length ? Math.round((buyers.size / users.length) * 100) : 0;
+  return {
+    text: `📊 Статистика
+
+👥 Пользователи: ${users.length} (новых за 24ч: ${newUsers})
+📱 Устройства: ${devices.length} (активных за 24ч: ${active24})
+🔑 Ключи: ${keys.length} (активных: ${activeKeys}, свободных: ${freeKeys})
+🛒 Покупок тарифов: ${purchases.length} (за 24ч: ${purchases24})
+💵 Доход: $${incomeTotal.toFixed(2)} · 24ч: $${income24.toFixed(2)} · 7д: $${income7.toFixed(2)}
+📈 Конверсия в покупку: ${conv}%
+
+Доход — по оплаченным пополнениям; конверсия — доля пользователей, купивших тариф.`,
+    markup: {
+      inline_keyboard: [
+        [{ text: '🔄 Обновить', callback_data: 'm:stats' }],
+        [{ text: '◀️ Админка', callback_data: 'm:admin' }]
+      ]
+    }
+  };
+}
+
 function subText(key) {
   const entry = findKey(key);
   if (!entry) return 'Подписка: ключ не найден';
@@ -681,6 +763,11 @@ function referralMenu(chatId) {
   const u = user(chatId);
   const invited = Object.keys(state.users)
     .filter((other) => String(state.users[other].referredBy || '') === id).length;
+  const refPurchases = (state.purchases || []).filter((p) => {
+    const bu = state.users[String(p.chatId)];
+    return bu && String(bu.referredBy || '') === id;
+  });
+  const refSpent = refPurchases.reduce((acc, p) => acc + Number(p.price || 0), 0);
   const link = BOT_USERNAME
     ? `https://t.me/${BOT_USERNAME}?start=ref_${id}`
     : 'ссылка появится после запуска бота';
@@ -688,8 +775,10 @@ function referralMenu(chatId) {
     text: `👥 Реферальная система\n\n` +
       `Ваша ссылка:\n${link}\n\n` +
       `Приглашено: ${invited}\n` +
-      `Заработано: $${(invited * REFERRAL_BONUS).toFixed(2)}\n\n` +
-      `За каждого друга, который впервые зайдёт по ссылке — +$${REFERRAL_BONUS.toFixed(2)} на баланс.`,
+      `За входы: $${(invited * REFERRAL_BONUS).toFixed(2)}\n` +
+      `Покупок рефералов: ${refPurchases.length} на $${refSpent.toFixed(2)}\n\n` +
+      `За каждого друга, который впервые зайдёт по ссылке — +$${REFERRAL_BONUS.toFixed(2)}.\n` +
+      `С покупки друга — 10% на баланс, с покупки его друга — 5%.`,
     markup: {
       inline_keyboard: [
         [{ text: '📤 Поделиться ссылкой', url: link.startsWith('http') ? link : 'https://t.me' }],
@@ -852,6 +941,7 @@ function adminMenu() {
           { text: '🎫 Тикеты', callback_data: 'm:tickets' },
           { text: 'ℹ️ Помощь', callback_data: 'm:help' }
         ],
+        [{ text: '📊 Статистика', callback_data: 'm:stats' }],
         [{ text: '◀️ Меню', callback_data: 'm:home' }]
       ]
     }
@@ -1243,7 +1333,8 @@ async function handleCallback(q) {
         chatId: q.from.id,
         amount,
         status: 'active',
-        link: invoice.link
+        link: invoice.link,
+        createdAt: Date.now()
       });
       save();
       return show(q, {
@@ -1392,7 +1483,9 @@ async function handleCallback(q) {
       const key = newKey(plan.days);
       const entry = findKey(key);
       if (entry) entry.chatId = q.from.id;
+      state.purchases.push({ chatId: q.from.id, plan: plan.id, price, ts: Date.now() });
       save();
+      await awardPurchase(q.from.id, price);
       await checkLowBalance(q.from.id);
       return show(q, {
         text: `✅ Оплачено с баланса: $${price}\n\n` +
@@ -1445,6 +1538,7 @@ async function handleCallback(q) {
       return;
     }
     if (data === 'm:admin') return show(q, adminMenu());
+    if (data === 'm:stats') return show(q, statsMenu());
     if (data === 'm:keys') return show(q, keysMenu());
     if (data === 'm:devs') return show(q, devicesMenu());
     if (data === 'm:bans') return show(q, bansMenu());
@@ -1800,6 +1894,16 @@ async function startFlow(chatId, payload, cbq) {
   } else if (isNewUser) {
     save();
   }
+  const today = moscowDay();
+  if (current.lastBonusDay !== today) {
+    current.lastBonusDay = today;
+    current.balance = Math.round((Number(current.balance || 0) + DAILY_BONUS) * 100) / 100;
+    save();
+    await tg('sendMessage', {
+      chat_id: chatId,
+      text: `🎁 Ежедневный бонус: +$${DAILY_BONUS.toFixed(2)} на баланс.`
+    });
+  }
   const m = mainMenuFor(chatId);
   if (cbq) return show(cbq, m);
   return sendMainMenu(chatId);
@@ -1929,7 +2033,8 @@ async function handleMessage(msg) {
       chatId,
       amount,
       status: 'active',
-      link: invoice.link
+      link: invoice.link,
+      createdAt: Date.now()
     });
     save();
     return tg('sendMessage', {
