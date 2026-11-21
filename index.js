@@ -1106,6 +1106,10 @@ function keysMenu() {
           { text: '➕ Создать ×5', callback_data: 'k:new5' }
         ],
         [
+          { text: '⏳ 1 день', callback_data: 'k:new1' },
+          { text: '⏳ 3 дня', callback_data: 'k:new3' }
+        ],
+        [
           { text: '⏳ 7 дней', callback_data: 'k:new7' },
           { text: '⏳ 30 дней', callback_data: 'k:new30' }
         ],
@@ -1716,7 +1720,10 @@ async function handleCallback(q) {
     }
     if (data.startsWith('k:new')) {
       const count = data === 'k:new5' ? 5 : 1;
-      const days = data === 'k:new7' ? 7 : data === 'k:new30' ? 30 : 0;
+      const days = data === 'k:new1' ? 1
+        : data === 'k:new3' ? 3
+        : data === 'k:new7' ? 7
+        : data === 'k:new30' ? 30 : 0;
       const created = [];
       for (let i = 0; i < count; i++) created.push(newKey(days));
       save();
