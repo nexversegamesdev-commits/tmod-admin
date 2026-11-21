@@ -563,6 +563,7 @@ function deviceButtons(index) {
       { text: '🔓 Сброс (force)', callback_data: 'frc:' + device.key }
     ]);
   }
+  rows.push([{ text: '🗑 Удалить устройство', callback_data: 'dd:' + index }]);
   rows.push([{ text: '◀️ К устройствам', callback_data: 'm:devs' }]);
   return { inline_keyboard: rows };
 }
@@ -1688,6 +1689,37 @@ async function handleCallback(q) {
       const d = state.devices[index];
       if (!d) return show(q, devicesMenu());
       return show(q, { text: deviceText(d), markup: deviceButtons(index) });
+    }
+    if (data.startsWith('dd!:')) {
+      const index = parseInt(data.slice(4), 10);
+      const d = state.devices[index];
+      if (d) {
+        state.devices.splice(index, 1);
+        save();
+        await tg('answerCallbackQuery', {
+          callback_query_id: q.id, text: 'Устройство удалено'
+        });
+      } else {
+        await tg('answerCallbackQuery', {
+          callback_query_id: q.id, text: 'Уже удалено'
+        });
+      }
+      return show(q, devicesMenu());
+    }
+    if (data.startsWith('dd:')) {
+      const index = parseInt(data.slice(3), 10);
+      const d = state.devices[index];
+      if (!d) return show(q, devicesMenu());
+      return show(q, {
+        text: 'Удалить устройство из списка?\n\n' + deviceText(d) +
+          '\n\nКлюч и подписка останутся, удалится только запись об устройстве.',
+        markup: {
+          inline_keyboard: [
+            [{ text: '✅ Удалить', callback_data: 'dd!:' + index }],
+            [{ text: '❌ Отмена', callback_data: 'd:' + index }]
+          ]
+        }
+      });
     }
     if (data.startsWith('bh:') || data.startsWith('bk:')) {
       const isHwid = data.startsWith('bh:');
