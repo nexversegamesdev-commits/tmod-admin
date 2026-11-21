@@ -621,13 +621,21 @@ async function geoLookup(ip) {
   try {
     if (!ip || ip === '?' || ip.startsWith('10.') || ip.startsWith('192.168.')
         || ip.startsWith('127.') || ip.startsWith('172.')) return '?';
-    const res = await fetch(`https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country,region,city`);
-    const json = await res.json();
-    if (json && json.success) {
-      return [json.country, json.region, json.city].filter(Boolean).join(', ') || '?';
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    try {
+      const res = await fetch(
+        `https://ipwho.is/${encodeURIComponent(ip)}?fields=success,country,region,city`,
+        { signal: controller.signal });
+      const json = await res.json();
+      if (json && json.success) {
+        return [json.country, json.region, json.city].filter(Boolean).join(', ') || '?';
+      }
+    } finally {
+      clearTimeout(timer);
     }
   } catch (e) {
-    // гео недоступно
+    // гео недоступно или таймаут
   }
   return '?';
 }
