@@ -633,7 +633,7 @@ function mainMenuFor(id) {
       { text: '👥 Реферальная система', callback_data: 'm:ref' },
       { text: '🆘 Поддержка', callback_data: 'm:support' }
     ],
-    [{ text: '📥 Скачать APK', url: APK_URL }],
+    [{ text: '📥 Скачать APK', callback_data: 'apk:send' }],
     [{ text: 'ℹ️ Помощь', callback_data: 'm:help2' }]
   ];
   if (isAdmin(id)) {
@@ -1128,6 +1128,29 @@ async function handleCallback(q) {
         text: 'Сначала подпишитесь на канал @GreiTikTok'
       });
       return show(q, subGateMenu());
+    }
+    if (data === 'apk:send') {
+      const chatId = q.from.id;
+      if (state.apkMessageId) {
+        const r = await tg('copyMessage', {
+          chat_id: chatId,
+          from_chat_id: state.apkChatId || SUB_CHANNEL,
+          message_id: state.apkMessageId
+        });
+        if (r && r.ok) {
+          await tg('answerCallbackQuery', {
+            callback_query_id: q.id, text: 'APK отправлен'
+          });
+          return;
+        }
+        console.error('apk copy failed:', (r && r.description) || 'unknown');
+      }
+      await tg('answerCallbackQuery', { callback_query_id: q.id, text: 'Открываю ссылку' });
+      return tg('sendMessage', {
+        chat_id: chatId,
+        text: 'APK файлом отправить не удалось. Скачайте по кнопке:',
+        reply_markup: { inline_keyboard: [[{ text: '📥 Скачать APK', url: APK_URL }]] }
+      });
     }
     if (data === 'm:home') return show(q, mainMenuFor(q.from.id));
     if (data === 'm:market') return show(q, marketMenu());
@@ -1783,6 +1806,23 @@ async function startFlow(chatId, payload, cbq) {
   return sendMainMenu(chatId);
 }
 
+/** Пост в канале с APK: запоминаем сообщение, чтобы бот мог переслать файл. */
+async function handleChannelPost(msg) {
+  try {
+    const doc = msg && msg.document;
+    if (!doc) return;
+    const name = String(doc.file_name || '');
+    if (!name.toLowerCase().endsWith('.apk')) return;
+    state.apkMessageId = msg.message_id;
+    state.apkChatId = msg.chat.id;
+    state.apkFileName = name;
+    save();
+    console.log('apk stored', name, msg.message_id);
+  } catch (e) {
+    console.error('channel post failed', e);
+  }
+}
+
 async function handleMessage(msg) {
   const chatId = msg.chat && msg.chat.id;
   if (!chatId) return;
@@ -2040,6 +2080,7 @@ async function poll() {
       const json = await res.json();
       for (const u of json.result || []) {
         offset = u.update_id + 1;
+        if (u.channel_post) await handleChannelPost(u.channel_post);
         if (u.message) await handleMessage(u.message);
         if (u.callback_query) await handleCallback(u.callback_query);
       }
